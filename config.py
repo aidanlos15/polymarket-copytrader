@@ -1,0 +1,75 @@
+"""Configuration loader for the Polymarket paper-trade copytrading bot.
+
+Reads settings from a local .env file (see .env.example). Nothing here is secret
+except the path to the Google service-account key; the actual trade data lives in
+the Google Sheet, not on disk.
+"""
+from __future__ import annotations
+
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def _get(name: str, default: str | None = None, required: bool = False) -> str:
+    val = os.getenv(name, default)
+    if required and (val is None or val == ""):
+        raise SystemExit(
+            f"Missing required config '{name}'. Copy .env.example to .env and fill it in."
+        )
+    return val if val is not None else ""
+
+
+# --- Polymarket target ------------------------------------------------------
+# Defaults to @RN1; override in .env to copy a different wallet.
+TARGET_ADDRESS: str = _get(
+    "TARGET_ADDRESS", "0x2005d16a84ceefa912d4e380cd32e7ff827875ea"
+).lower()
+# Display name for this target (used in the dashboard title and logs).
+TARGET_NAME: str = _get("TARGET_NAME", "RN1")
+SCALE_RATIO: float = float(_get("SCALE_RATIO", "0.01"))
+# Polymarket's order minimum is $1 — ignore any trade whose USD value is below this.
+MIN_TRADE_USD: float = float(_get("MIN_TRADE_USD", "1.0"))
+POLL_INTERVAL_SECONDS: int = int(_get("POLL_INTERVAL_SECONDS", "30"))  # legacy / fallback
+# Decoupled cadences: detect new trades often (cheap), re-price positions less often
+# (expensive — one CLOB call per market). Detection drives entry timing.
+DETECT_INTERVAL_SECONDS: int = int(_get("DETECT_INTERVAL_SECONDS", "7"))
+REPRICE_INTERVAL_SECONDS: int = int(_get("REPRICE_INTERVAL_SECONDS", "45"))
+TRADES_PER_POLL: int = int(_get("TRADES_PER_POLL", "200"))
+
+# --- Local Excel datastore --------------------------------------------------
+EXCEL_PATH: str = _get(
+    "EXCEL_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "polymarket_paper_trades.xlsx"),
+)
+
+# --- API hosts (public, no auth) -------------------------------------------
+DATA_API: str = "https://data-api.polymarket.com"
+CLOB_API: str = "https://clob.polymarket.com"
+
+# --- Live trading (REAL MONEY) ----------------------------------------------
+# OFF by default: the bot records what it WOULD trade ("DRY_RUN") without sending.
+# Set ENABLE_LIVE_TRADING=true ONLY after you understand the risks.
+def _bool(name: str, default: str = "false") -> bool:
+    return _get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+ENABLE_LIVE_TRADING: bool = _bool("ENABLE_LIVE_TRADING", "false")
+
+# The signing key is read from one of these — NEVER from the spreadsheet:
+#   1. POLYMARKET_PK environment variable, or
+#   2. PRIVATE_KEY_FILE: path to a file containing only the key (must be chmod 600).
+PRIVATE_KEY_FILE: str = _get("PRIVATE_KEY_FILE", "")
+
+# Polymarket account type: 0 = EOA (you hold the key & funds), 1 = email/magic proxy,
+# 2 = browser-wallet proxy. For 1/2, FUNDER_ADDRESS must be the proxy wallet holding USDC.
+SIGNATURE_TYPE: int = int(_get("SIGNATURE_TYPE", "0"))
+FUNDER_ADDRESS: str = _get("FUNDER_ADDRESS", "")
+
+# Hard safety rails.
+LIVE_MAX_ORDER_USD: float = float(_get("LIVE_MAX_ORDER_USD", "50"))     # per-order cap (USD)
+LIVE_DAILY_MAX_USD: float = float(_get("LIVE_DAILY_MAX_USD", "500"))    # per-run spend cap (USD)
+# Only live-copy FRESH trades: never place a real order for a trade older than this
+# (protects against backfills and stale/resolved markets). Seconds.
+MAX_COPY_LAG_SECONDS: int = int(_get("MAX_COPY_LAG_SECONDS", "120"))

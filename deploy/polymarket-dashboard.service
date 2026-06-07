@@ -1,0 +1,19 @@
+[Unit]
+Description=Polymarket copytrader - web dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/polymarket
+ExecStart=/opt/polymarket/.venv/bin/python /opt/polymarket/dashboard.py
+Environment=PYTHONUNBUFFERED=1
+Environment=DASHBOARD_DATA_DIR=/opt/polymarket/data
+Environment=DASHBOARD_PORT=8080
+# IMPORTANT: change these before exposing the VM to the internet.
+Environment=DASHBOARD_USER=admin
+Environment=DASHBOARD_PASS=CHANGE_ME_NOW
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,358 @@
+"""Polymarket copytrading paper-trade bot.
+
+Continuously mirrors a target Polymarket user's trades as *paper* trades (no real
+orders are ever placed), logging everything to a local Excel file and re-pricing
+positions live.
+
+Two decoupled cadences run in one loop:
+  - DETECT every few seconds: cheap /trades poll to copy new trades fast (entry timing).
+  - REPRICE less often: the expensive per-market mark-to-market of all positions.
+
+Usage:
+    python bot.py                # start the live loop
+    python bot.py --backfill 50  # seed from the target's last 50 trades, then loop
+    python bot.py --once         # run a single cycle and exit (handy for testing)
+
+The Excel file is the only datastore — restart-safe via trade-id dedupe.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import statistics
+import time
+from collections import defaultdict
+from datetime import datetime, timezone
+
+import config
+import polymarket_client as pm
+from excel_client import ExcelClient
+from trader import Executor
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def trade_id(t: dict) -> str:
+    """Stable unique key for a fill. One tx can contain several fills, so include
+    asset, outcomeIndex and timestamp alongside the transaction hash."""
+    return ":".join(str(t.get(k, "")) for k in
+                     ("transactionHash", "asset", "outcomeIndex", "timestamp"))
+
+
+def process_new_trades(sheets: ExcelClient, trades: list[dict],
+                       processed: set[str], executor: Executor) -> tuple[int, list[int]]:
+    """Append any not-yet-seen trades as paper trades.
+
+    Returns (count_added, detect_lags). detect_lag_s = how stale the feed was when we
+    saw each trade = our log time minus the trade's on-chain timestamp (indexer lag +
+    our own poll phase). Trades arrive newest-first; we process oldest-first.
+    """
+    added = 0
+    skipped = 0
+    lags: list[int] = []
+    for t in reversed(trades):
+        tid = trade_id(t)
+        if tid in processed:
+            continue
+
+        asset = str(t.get("asset", ""))
+        side = str(t.get("side", "BUY")).upper()
+        rn1_size = float(t.get("size", 0) or 0)
+        rn1_price = float(t.get("price", 0) or 0)
+
+        # Skip sub-$1 trades: Polymarket's order minimum is $1, so anything below that
+        # is dust (resolution/merge remnants). Not logged -> never counted in P&L.
+        if rn1_size * rn1_price < config.MIN_TRADE_USD:
+            skipped += 1
+            continue
+
+        # Price our paper fill at the *current* market price for that side.
+        entry = pm.get_price(asset, side)
+        if entry is None:
+            # Fall back to the price RN1 actually traded at if the book is unavailable.
+            entry = float(t.get("price", 0) or 0)
+
+        paper_size = rn1_size * config.SCALE_RATIO
+        paper_cost = paper_size * entry
+
+        try:
+            lag = int(time.time()) - int(t.get("timestamp", 0))
+        except (TypeError, ValueError):
+            lag = ""
+        if isinstance(lag, int) and lag >= 0:
+            lags.append(lag)
+
+        # Place (or simulate, in dry-run) the live market order mirroring this trade.
+        # Only FRESH trades are ever live-copied (guards backfills / stale markets).
+        fresh = isinstance(lag, int) and 0 <= lag <= config.MAX_COPY_LAG_SECONDS
+        exec_result = executor.execute(
+            token_id=asset, side=side, usd_amount=paper_cost, shares=paper_size, fresh=fresh)
+
+        sheets.append_trade({
+            "trade_id": tid,
+            "detected_at": _now_iso(),
+            "trade_ts": t.get("timestamp", ""),
+            "market_title": t.get("title", ""),
+            "slug": t.get("slug", ""),
+            "outcome": t.get("outcome", ""),
+            "side": side,
+            "token_id": asset,
+            "condition_id": t.get("conditionId", ""),
+            "rn1_size": round(rn1_size, 4),
+            "rn1_price": t.get("price", ""),
+            "scale_ratio": config.SCALE_RATIO,
+            "paper_size": round(paper_size, 6),
+            "paper_entry_price": round(entry, 6),
+            "paper_cost": round(paper_cost, 6),
+            "tx_hash": t.get("transactionHash", ""),
+            "detect_lag_s": lag,
+            **exec_result,
+        })
+        processed.add(tid)
+        added += 1
+        print(f"  + {side} {paper_size:.4f} @ {entry:.4f} [{exec_result['live_status']}]  "
+              f"{t.get('title','')[:46]}")
+    # Only mention skipped dust when we also logged something, to avoid spamming the
+    # log on every routine detect pass (the latest-N window always has a few sub-$1s).
+    if skipped and added:
+        print(f"  (also skipped {skipped} sub-${config.MIN_TRADE_USD:g} dust trade(s))")
+    return added, lags
+
+
+# Final prices of markets already known to be resolved/closed. Once a market closes its
+# price is fixed (1.0/0.0), so we cache it and stop calling the API for it — resolution
+# detection is effectively free and re-pricing gets cheaper as more markets settle.
+_RESOLVED_CACHE: dict[str, dict[str, float]] = {}
+
+
+def fetch_current_prices(trade_rows: list[dict]) -> tuple[dict[str, float], dict[str, bool]]:
+    """Fetch the current price for every token we hold, one call per market.
+
+    Returns (price_by_token, resolved_by_condition). Markets already in the resolved
+    cache are served from it with no API call. Many trades share a market, so we query
+    GET /markets/<conditionId> once per unique conditionId.
+    """
+    price_by_token: dict[str, float] = {}
+    resolved_by_condition: dict[str, bool] = {}
+    conditions = {str(r.get("condition_id", "")) for r in trade_rows if r.get("condition_id")}
+    for cid in conditions:
+        if cid in _RESOLVED_CACHE:                       # settled — no API call needed
+            price_by_token.update(_RESOLVED_CACHE[cid])
+            resolved_by_condition[cid] = True
+            continue
+        m = pm.get_market(cid)
+        if m and m["prices"]:
+            price_by_token.update(m["prices"])
+            resolved_by_condition[cid] = m["closed"]
+            if m["closed"]:
+                _RESOLVED_CACHE[cid] = m["prices"]       # cache final prices forever
+        else:
+            resolved_by_condition[cid] = False
+    return price_by_token, resolved_by_condition
+
+
+def mark_to_market(sheets: ExcelClient) -> None:
+    """Mark every logged trade to the current market price and recompute P&L.
+
+    Per-trade P&L = paper_size * (current_price - entry) for a BUY (mirror for SELL).
+    Positions split into OPEN (still trading) and RESOLVED (market closed): resolved
+    positions are settled, so their P&L is *realized* and they are EXCLUDED from the
+    live portfolio value. Open positions' value is the portfolio value (unrealized P&L).
+    """
+    now = _now_iso()
+    trades = sheets.read_all_trades()
+    price_by_token, resolved_by_condition = fetch_current_prices(trades)
+
+    marks: dict[str, dict] = {}                 # trade_id -> mark columns
+    agg: dict[str, dict] = defaultdict(lambda: {
+        "net_paper_size": 0.0, "total_bought": 0.0, "cost_basis": 0.0, "pnl": 0.0,
+        "market_title": "", "outcome": "", "condition_id": "", "cur_price": None,
+    })
+    priced = unpriced = 0
+
+    for t in trades:
+        tid = str(t.get("trade_id", ""))
+        token = str(t.get("token_id", ""))
+        cid = str(t.get("condition_id", ""))
+        side = str(t.get("side", "BUY")).upper()
+        size = float(t.get("paper_size") or 0)
+        entry = float(t.get("paper_entry_price") or 0)
+        cur = price_by_token.get(token)
+
+        if cur is None:
+            # No price available for this market — leave it blank, don't count it.
+            marks[tid] = {"current_price": "", "current_value": "", "pnl": "", "pnl_updated": now}
+            unpriced += 1
+            continue
+
+        priced += 1
+        if side == "BUY":
+            pnl = size * (cur - entry)
+        else:  # SELL — profit if the price fell after we sold
+            pnl = size * (entry - cur)
+        marks[tid] = {
+            "current_price": round(cur, 6),
+            "current_value": round(size * cur if side == "BUY" else 0.0, 4),
+            "pnl": round(pnl, 4),
+            "pnl_updated": now,
+        }
+
+        a = agg[token]
+        a["market_title"] = t.get("market_title", a["market_title"])
+        a["outcome"] = t.get("outcome", a["outcome"])
+        a["condition_id"] = cid
+        a["cur_price"] = cur
+        a["pnl"] += pnl
+        if side == "BUY":
+            a["net_paper_size"] += size
+            a["total_bought"] += size
+            a["cost_basis"] += size * entry
+        else:
+            a["net_paper_size"] -= size
+
+    # Write per-trade marks back to the Trades sheet.
+    sheets.update_trade_marks(marks)
+
+    # Build the per-token Positions view and split Open vs Resolved.
+    rows: list[dict] = []
+    total_pnl = total_cost = 0.0
+    realized_pnl = unrealized_pnl = portfolio_value = 0.0
+    open_count = resolved_count = 0
+    for token, a in agg.items():
+        cur = a["cur_price"]
+        net = a["net_paper_size"]
+        cost = a["cost_basis"]
+        cur_value = net * cur if cur is not None else 0.0
+        avg_entry = (cost / a["total_bought"]) if a["total_bought"] > 1e-9 else 0.0
+        pnl_pct = (a["pnl"] / cost * 100) if cost > 1e-9 else 0.0
+        resolved = resolved_by_condition.get(a["condition_id"], False)
+        status = "RESOLVED" if resolved else "OPEN"
+
+        total_pnl += a["pnl"]
+        total_cost += cost
+        if resolved:
+            realized_pnl += a["pnl"]            # settled — locked in
+            resolved_count += 1
+        else:
+            unrealized_pnl += a["pnl"]          # still at risk
+            portfolio_value += cur_value        # only OPEN positions count here
+            open_count += 1
+
+        rows.append({
+            "market_title": a["market_title"],
+            "outcome": a["outcome"],
+            "status": status,
+            "net_paper_size": round(net, 6),
+            "total_bought": round(a["total_bought"], 6),
+            "avg_entry_price": round(avg_entry, 6),
+            "cost_basis": round(cost, 4),
+            "current_price": round(cur, 6) if cur is not None else "",
+            "current_value": round(cur_value, 4),
+            "pnl": round(a["pnl"], 4),
+            "pnl_pct": round(pnl_pct, 2),
+            "price_source": "RESOLVED" if resolved else "OPEN",
+            "last_updated": now,
+            "token_id": token,
+            "condition_id": a["condition_id"],
+        })
+    # Open positions first, then by P&L.
+    rows.sort(key=lambda r: (r["status"] == "RESOLVED", -r["pnl"]))
+    summary = {
+        "last_updated": now,
+        "total_cost": round(total_cost, 4),
+        "total_pnl": round(total_pnl, 4),
+        "total_pnl_pct": round((total_pnl / total_cost * 100) if total_cost > 1e-9 else 0.0, 2),
+        "realized_pnl": round(realized_pnl, 4),
+        "unrealized_pnl": round(unrealized_pnl, 4),
+        "portfolio_value": round(portfolio_value, 4),
+        "open_count": open_count,
+        "resolved_count": resolved_count,
+        "priced_count": priced,
+        "unpriced_count": unpriced,
+    }
+    sheets.write_positions(rows, summary)
+    write_state_json(summary, rows)
+    print(f"  marked {priced} trades ({unpriced} unpriced) | open {open_count} "
+          f"(value ${portfolio_value:,.2f}, unreal ${unrealized_pnl:,.2f}) | "
+          f"resolved {resolved_count} (real ${realized_pnl:,.2f}) | total P&L ${total_pnl:,.2f}")
+
+
+def write_state_json(summary: dict, rows: list[dict]) -> None:
+    """Write a small JSON snapshot (summary + positions) next to the Excel file, for the
+    web dashboard to read. Atomic via temp-file rename so the dashboard never sees a
+    half-written file."""
+    state = {
+        "name": config.TARGET_NAME,
+        "address": config.TARGET_ADDRESS,
+        "live": config.ENABLE_LIVE_TRADING,
+        "summary": summary,
+        "positions": rows,
+    }
+    base = os.path.dirname(os.path.abspath(config.EXCEL_PATH))
+    path = os.path.join(base, f"state_{config.TARGET_NAME}.json")
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as fh:
+            json.dump(state, fh)
+        os.replace(tmp, path)
+    except OSError as exc:
+        print(f"  [state] could not write {path}: {exc}")
+
+
+def detect_pass(sheets: ExcelClient, limit: int, executor: Executor) -> int:
+    """Cheap pass: poll /trades and log any new ones. Reports detection lag."""
+    processed = sheets.read_processed_trade_ids()
+    trades = pm.get_trades(config.TARGET_ADDRESS, limit=limit)
+    added, lags = process_new_trades(sheets, trades, processed, executor)
+    if added:
+        if lags:
+            print(f"  logged {added} new | detect lag s: "
+                  f"median {int(statistics.median(lags))}, "
+                  f"min {min(lags)}, max {max(lags)}")
+        else:
+            print(f"  logged {added} new paper trade(s)")
+    return added
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Polymarket paper-trade copytrading bot")
+    ap.add_argument("--backfill", type=int, default=0,
+                    help="seed from the target's last N trades on first detect pass")
+    ap.add_argument("--once", action="store_true", help="run one cycle and exit")
+    args = ap.parse_args()
+
+    print(f"Tracking @{config.TARGET_NAME} ({config.TARGET_ADDRESS}) | scale {config.SCALE_RATIO} "
+          f"| detect {config.DETECT_INTERVAL_SECONDS}s | reprice {config.REPRICE_INTERVAL_SECONDS}s")
+    sheets = ExcelClient()
+    print(f"Writing to {config.EXCEL_PATH}")
+    executor = Executor()
+
+    # First detect pass fetches `--backfill N` trades (seed history); after that, the
+    # normal per-poll window.
+    first_limit = args.backfill if args.backfill else config.TRADES_PER_POLL
+
+    if args.once:
+        detect_pass(sheets, first_limit, executor)
+        mark_to_market(sheets)
+        return
+
+    first = True
+    last_reprice = 0.0
+    while True:
+        try:
+            detect_pass(sheets, first_limit if first else config.TRADES_PER_POLL, executor)
+            # Re-price on the first loop, then only every REPRICE_INTERVAL seconds.
+            if first or (time.monotonic() - last_reprice) >= config.REPRICE_INTERVAL_SECONDS:
+                mark_to_market(sheets)
+                last_reprice = time.monotonic()
+            first = False
+        except Exception as exc:  # keep the loop alive across transient failures
+            print(f"  cycle error: {exc!r}")
+        time.sleep(config.DETECT_INTERVAL_SECONDS)
+
+
+if __name__ == "__main__":
+    main()

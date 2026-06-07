@@ -1,0 +1,17 @@
+[Unit]
+Description=Polymarket copytrader - swisstony
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/polymarket
+ExecStart=/opt/polymarket/.venv/bin/python /opt/polymarket/bot.py
+Environment=PYTHONUNBUFFERED=1
+Environment=TARGET_ADDRESS=0x204f72f35326db932158cba6adff0b9a1da95e14
+Environment=TARGET_NAME=swisstony
+Environment=EXCEL_PATH=/opt/polymarket/data/swisstony_paper_trades.xlsx
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
