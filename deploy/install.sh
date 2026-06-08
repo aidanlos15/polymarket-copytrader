@@ -14,7 +14,16 @@ echo ">> Creating $APP ..."
 sudo mkdir -p "$APP/data"
 sudo cp "$REPO"/bot.py "$REPO"/polymarket_client.py "$REPO"/excel_client.py \
         "$REPO"/config.py "$REPO"/trader.py "$REPO"/dashboard.py \
-        "$REPO"/requirements.txt "$APP/"
+        "$REPO"/onchain_detector.py "$REPO"/requirements.txt "$APP/"
+
+# Secrets: copy the .env (POLYGON_HTTP = your Alchemy endpoint) if you created one.
+if [ -f "$REPO/.env" ]; then
+    sudo cp "$REPO/.env" "$APP/.env"
+    echo ">> Copied .env (POLYGON_HTTP) into $APP"
+else
+    echo ">> WARNING: no .env found. On-chain detection needs POLYGON_HTTP."
+    echo "   Create $APP/.env with:  POLYGON_HTTP=https://polygon-mainnet.g.alchemy.com/v2/YOURKEY"
+fi
 
 echo ">> Python venv + deps ..."
 sudo python3 -m venv "$APP/.venv"
