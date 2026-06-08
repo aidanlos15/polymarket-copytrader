@@ -177,6 +177,7 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
     agg: dict[str, dict] = defaultdict(lambda: {
         "net_paper_size": 0.0, "total_bought": 0.0, "cost_basis": 0.0, "pnl": 0.0,
         "market_title": "", "outcome": "", "condition_id": "", "cur_price": None,
+        "whale_cost": 0.0, "lag_sum": 0.0, "lag_n": 0,
     })
     priced = unpriced = hidden = 0
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -238,10 +239,17 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
         a["condition_id"] = cid
         a["cur_price"] = cur
         a["pnl"] += pnl
+        # Detection lag for this token (averaged across its trades).
+        try:
+            a["lag_sum"] += float(t.get("detect_lag_s"))
+            a["lag_n"] += 1
+        except (TypeError, ValueError):
+            pass
         if side == "BUY":
             a["net_paper_size"] += size
             a["total_bought"] += size
             a["cost_basis"] += size * entry
+            a["whale_cost"] += size * float(t.get("rn1_price") or 0)  # whale's own fill price
         else:
             a["net_paper_size"] -= size
 
@@ -259,6 +267,8 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
         cost = a["cost_basis"]
         cur_value = net * cur if cur is not None else 0.0
         avg_entry = (cost / a["total_bought"]) if a["total_bought"] > 1e-9 else 0.0
+        whale_entry = (a["whale_cost"] / a["total_bought"]) if a["total_bought"] > 1e-9 else 0.0
+        avg_lag = round(a["lag_sum"] / a["lag_n"]) if a["lag_n"] else ""
         pnl_pct = (a["pnl"] / cost * 100) if cost > 1e-9 else 0.0
         resolved = resolved_by_condition.get(a["condition_id"], False)
         status = "RESOLVED" if resolved else "OPEN"
@@ -280,6 +290,8 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
             "net_paper_size": round(net, 6),
             "total_bought": round(a["total_bought"], 6),
             "avg_entry_price": round(avg_entry, 6),
+            "whale_entry": round(whale_entry, 6),
+            "avg_lag_s": avg_lag,
             "cost_basis": round(cost, 4),
             "current_price": round(cur, 6) if cur is not None else "",
             "current_value": round(cur_value, 4),

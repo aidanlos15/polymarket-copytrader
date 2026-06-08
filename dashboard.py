@@ -153,9 +153,11 @@ def _render_tracker(s: dict, scale_val: int) -> str:
             f'<td><span class="tag {st}">{st}</span></td>'
             f'<td>{r.get("net_paper_size","")}</td>'
             f'<td>{r.get("avg_entry_price","")}</td>'
+            f'<td>{r.get("whale_entry","")}</td>'
             f'<td>{r.get("current_price","")}</td>'
             f'<td>{_money(r.get("current_value",0))}</td>'
-            f'<td class="{_cls(r.get("pnl",0))}">{_money(r.get("pnl",0))}</td></tr>')
+            f'<td class="{_cls(r.get("pnl",0))}">{_money(r.get("pnl",0))}</td>'
+            f'<td>{r.get("avg_lag_s","")}</td></tr>')
     note = f" (showing first 200 of {len(rows)})" if len(rows) > 200 else ""
 
     controls = f"""
@@ -179,7 +181,8 @@ def _render_tracker(s: dict, scale_val: int) -> str:
       {daily_html}
       <table>
         <tr><th class="l">Market</th><th class="l">Outcome</th><th>Status</th><th>Size</th>
-            <th>Avg Entry</th><th>Cur Price</th><th>Value</th><th>P&L</th></tr>
+            <th>Our Entry</th><th>Whale Entry</th><th>Cur Price</th><th>Value</th><th>P&L</th>
+            <th>Lag s</th></tr>
         {''.join(body)}
       </table>"""
 
