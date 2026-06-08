@@ -272,9 +272,9 @@ class ExcelClient:
         ws.merge_cells(start_row=5, start_column=3, end_row=5, end_column=ncols)
         ws.row_dimensions[5].height = 22
 
-        # Rows 6-7: per-day P&L strip — most recent days (date on row 6, daily P&L on row 7).
-        daily = summary.get("daily", [])[-(ncols - 1):]   # fit B.. across the sheet
-        dl = ws.cell(6, 1, "DAILY P&L →")
+        # Rows 6-7: per-day REALIZED P&L strip, most-recent-day first (date row 6, P&L row 7).
+        daily = summary.get("daily", [])[:ncols - 1]      # already sorted newest-first
+        dl = ws.cell(6, 1, "DAILY REALIZED →")
         dl.font = Font(bold=True, size=10, color="9CC3FF")
         dl.alignment = Alignment(horizontal="right", vertical="center")
         for j, (d, p) in enumerate(daily):

@@ -175,6 +175,8 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
         "market_title": "", "outcome": "", "condition_id": "", "cur_price": None,
     })
     priced = unpriced = hidden = 0
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    daily_realized: dict[str, float] = defaultdict(float)  # entry-date -> realized P&L
 
     for t in trades:
         tid = str(t.get("trade_id", ""))
@@ -215,6 +217,16 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
         if below_min:
             continue                            # excluded from positions / P&L
         priced += 1
+
+        # Daily P&L = REALIZED gains only (resolved trades), attributed to the day the
+        # position was opened. Computable for all history, so past days show immediately.
+        if resolved_by_condition.get(cid, False):
+            try:
+                d = datetime.fromtimestamp(
+                    int(float(t.get("trade_ts") or 0)), tz=timezone.utc).strftime("%Y-%m-%d")
+                daily_realized[d] += pnl
+            except (ValueError, OSError, OverflowError):
+                pass
 
         a = agg[token]
         a["market_title"] = t.get("market_title", a["market_title"])
@@ -276,7 +288,9 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
         })
     # Open positions first, then by P&L.
     rows.sort(key=lambda r: (r["status"] == "RESOLVED", -r["pnl"]))
-    daily_series, today_pnl = update_daily_pnl(total_pnl)
+    # Daily realized P&L, most-recent-day first (8th, 7th, 6th, ...). Sums to total realized.
+    daily_series = sorted(daily_realized.items(), key=lambda kv: kv[0], reverse=True)[:30]
+    today_pnl = daily_realized.get(today_str, 0.0)
     summary = {
         "last_updated": now,
         "total_cost": round(total_cost, 4),
@@ -299,49 +313,6 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
     print(f"  scale {scale_pct:g}% | counted {priced} (hidden <$1: {hidden}, unpriced {unpriced}) "
           f"| open {open_count} (value ${portfolio_value:,.2f}) | "
           f"resolved {resolved_count} (real ${realized_pnl:,.2f}) | total P&L ${total_pnl:,.2f}")
-
-
-def update_daily_pnl(total_pnl: float) -> tuple[list[tuple[str, float]], float]:
-    """Track P&L per calendar day as the change in total P&L over that day.
-
-    We persist each day's closing total P&L in daily_<NAME>.json. A past day's value is
-    never overwritten (so it's computed once and stays fixed); today's is updated every
-    cycle (so today's P&L keeps moving). Daily P&L[day] = close[day] - close[prev day],
-    with the first day measured against the baseline captured when tracking began (so the
-    one-time backfill lump is NOT counted as a single day's P&L).
-
-    Returns (sorted [(date, daily_pnl)], today_pnl).
-    """
-    base = os.path.dirname(os.path.abspath(config.EXCEL_PATH))
-    path = os.path.join(base, f"daily_{config.TARGET_NAME}.json")
-    store = {"baseline": total_pnl, "days": {}}
-    try:
-        with open(path) as fh:
-            loaded = json.load(fh)
-        if isinstance(loaded, dict) and "days" in loaded:
-            store = loaded
-    except (OSError, ValueError):
-        pass
-    store.setdefault("baseline", total_pnl)
-    store.setdefault("days", {})
-
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    store["days"][today] = total_pnl          # only today's close is ever updated
-    try:
-        tmp = path + ".tmp"
-        with open(tmp, "w") as fh:
-            json.dump(store, fh)
-        os.replace(tmp, path)
-    except OSError:
-        pass
-
-    series, prev = [], store["baseline"]
-    for d in sorted(store["days"]):
-        close = store["days"][d]
-        series.append((d, close - prev))
-        prev = close
-    today_pnl = series[-1][1] if series else 0.0
-    return series, today_pnl
 
 
 def write_state_json(summary: dict, rows: list[dict]) -> None:

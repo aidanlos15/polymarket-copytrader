@@ -109,13 +109,13 @@ def _render_tracker(s: dict) -> str:
         f'<div class="card {c}"><div class="label">{l}</div><div class="val">{v}</div></div>'
         for l, v, c in cards)
 
-    daily = summ.get("daily", [])[-14:]
+    daily = summ.get("daily", [])[:14]   # newest day first
     daily_html = ""
     if daily:
         chips = "".join(
             f'<div class="day"><div class="d">{d[5:]}</div>'
             f'<div class="v {_cls(p)}">{_money(p)}</div></div>' for d, p in daily)
-        daily_html = f'<div class="daily">{chips}</div>'
+        daily_html = f'<div class="daily"><span class="sub">Daily realized:</span> {chips}</div>'
 
     rows = s.get("positions", [])
     body = []
