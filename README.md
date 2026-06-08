@@ -94,6 +94,29 @@ Notes:
 
 ---
 
+## Low-latency on-chain detection (`onchain_detector.py`)
+
+The data API is **3–9 minutes stale** (measured). This detector instead reads the whale's
+trades **directly from the Polygon blockchain**, cutting detection lag to **~2–5 seconds**.
+
+- Polls `eth_getLogs` (~2s) for the Polymarket exchange contracts' `OrderFilled` events
+  where the whale is the **maker** (that leg is the whale's real order; neg-risk taker legs
+  are ignored). Decode verified to match the data API **12/12**, including neg-risk markets.
+- Enriches token id → market (conditionId/title/outcome) via Gamma, producing the same
+  trade fields the rest of the bot uses.
+
+Run standalone to watch live detections + lag:
+```bash
+python onchain_detector.py
+```
+Set `POLYGON_HTTP` to a free **Alchemy/Infura** Polygon endpoint for reliability (the
+default public RPC is flaky under load). `ONCHAIN_POLL_SECONDS` tunes the poll cadence.
+
+> Status: detector + decode built and verified. Wiring it in as the bot's primary trade
+> source (replacing the slow data-API poll, with cross-source dedupe) is the next step.
+
+---
+
 ## Run it online 24/7 (cloud VM + web dashboard)
 
 To keep it running whether your computer is on or off, host it on a cheap always-on

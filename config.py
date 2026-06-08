@@ -49,6 +49,11 @@ EXCEL_PATH: str = _get(
 DATA_API: str = "https://data-api.polymarket.com"
 CLOB_API: str = "https://clob.polymarket.com"
 
+# --- Polygon RPC (for the on-chain real-time detector) ----------------------
+# A free Alchemy/Infura key is recommended for reliable eth_subscribe support.
+POLYGON_HTTP: str = _get("POLYGON_HTTP", "https://polygon-bor-rpc.publicnode.com")
+ONCHAIN_POLL_SECONDS: float = float(_get("ONCHAIN_POLL_SECONDS", "2"))
+
 # --- Live trading (REAL MONEY) ----------------------------------------------
 # OFF by default: the bot records what it WOULD trade ("DRY_RUN") without sending.
 # Set ENABLE_LIVE_TRADING=true ONLY after you understand the risks.
