@@ -61,6 +61,22 @@ def _write_scale(name: str, v: int) -> None:
         fh.write(str(v))
 
 
+def _live_path(name: str) -> str:
+    return os.path.join(DATA_DIR, f"live_{name}.txt")
+
+
+def _read_live(name: str) -> bool:
+    try:
+        return open(_live_path(name)).read().strip().lower() == "on"
+    except OSError:
+        return False
+
+
+def _write_live(name: str, on: bool) -> None:
+    with open(_live_path(name), "w") as fh:
+        fh.write("on" if on else "off")
+
+
 def _money(x) -> str:
     try:
         return f"${float(x):,.2f}"
@@ -101,6 +117,10 @@ input[type=number] { width:64px; padding:5px 6px; border:1px solid #d0d7de; bord
 .day .d { color:#656d76; font-size:10px; }
 .day .v { font-size:12px; font-weight:700; }
 .banner { background:#ddf4ff; border:1px solid #0969da; border-radius:8px; padding:8px 12px; margin-bottom:12px; font-size:13px; }
+.liveswitch { padding:7px 16px; border-radius:9px; border:1px solid #d0d7de; font:inherit; font-weight:700; font-size:13px; cursor:pointer; }
+.liveswitch.off { background:#f6f8fa; color:#656d76; }
+.liveswitch.on { background:#cf222e; color:#fff; border-color:#cf222e; }
+.livewarn { background:#cf222e; color:#fff; padding:9px 13px; border-radius:8px; margin-bottom:12px; font-weight:700; }
 .card { background:#f6f8fa; border:1px solid #d0d7de; border-radius:10px; padding:12px 14px; }
 .card .label { color:#656d76; font-size:10px; letter-spacing:.04em; text-transform:uppercase; }
 .card .val { font-size:20px; font-weight:700; margin-top:4px; }
@@ -221,6 +241,16 @@ def _render_tracker(s: dict, scale_val: int, date_filter: str = "") -> str:
       </table></div>"""
 
 
+@app.route("/live", methods=["POST"])
+def set_live():
+    if not _auth_ok():
+        return Response("Auth required", 401, {"WWW-Authenticate": 'Basic realm="dashboard"'})
+    name = request.form.get("tracker", "").strip()
+    if name:
+        _write_live(name, request.form.get("on", "0") == "1")
+    return redirect(f"/?t={name}")
+
+
 @app.route("/scale", methods=["POST"])
 def set_scale():
     if not _auth_ok():
@@ -241,7 +271,7 @@ def index():
         return Response("Auth required", 401, {"WWW-Authenticate": 'Basic realm="dashboard"'})
     states = _load_states()
     if not states:
-        inner, toggle = "<p>No data yet — waiting for the bot's first cycle.</p>", ""
+        inner, toggle, livebtn, livewarn = "<p>No data yet — waiting for the bot's first cycle.</p>", "", "", ""
     else:
         names = list(states)
         active = request.args.get("t") or names[0]
@@ -256,6 +286,16 @@ def index():
             scale_val = int(s.get("summary", {}).get("scale_pct", 100) or 100)
         date_filter = request.args.get("date", "")
         inner = _render_tracker(s, scale_val, date_filter)
+        # Live/paper toggle (top-right). Turning it ON asks for confirmation.
+        live = bool(s.get("live"))
+        livebtn = (f'<form method="post" action="/live" onsubmit="return confirmLive(this)" '
+                   f'style="margin-left:auto">'
+                   f'<input type="hidden" name="tracker" value="{active}">'
+                   f'<input type="hidden" name="on" value="{0 if live else 1}">'
+                   f'<button class="liveswitch {"on" if live else "off"}">'
+                   f'{"● LIVE" if live else "○ PAPER"}</button></form>')
+        livewarn = (f'<div class="livewarn">⚠️ LIVE TRADING ACTIVE for @{active} — real '
+                    f'orders are being placed for new copied trades.</div>') if live else ""
 
     return f"""<!doctype html><html><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -266,13 +306,20 @@ def index():
         var el = document.getElementById('scaleinput');
         if (!el || document.activeElement !== el) location.reload();
       }}, 30000);
+      function confirmLive(f) {{
+        if (f.on.value === '1') return confirm(
+          '⚠️ Switch to LIVE TRADING?\\n\\nReal orders with REAL MONEY will be placed for new copied trades. Only do this if you have funded the account and configured a key.');
+        return true;
+      }}
     </script></head>
     <body><div class="wrap">
       <div class="topbar">
-        <h1 style="margin:0">Polymarket Paper Copytrader</h1>
+        <h1 style="margin:0">Polymarket Copytrader</h1>
         {toggle}
+        {livebtn}
       </div>
-      <div class="sub">switch trader above · auto-refreshes every 30s</div>
+      <div class="sub">switch trader above · toggle live/paper top-right · auto-refreshes every 30s</div>
+      {livewarn}
       {inner}
       <div class="foot">Paper trading unless a tracker shows LIVE. Not financial advice.</div>
     </div></body></html>"""

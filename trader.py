@@ -31,14 +31,24 @@ def _blank(status: str) -> dict:
 
 class Executor:
     def __init__(self) -> None:
-        self.live = config.ENABLE_LIVE_TRADING
         self.client = None
-        self._spent = 0.0  # USD spent on BUYs this run (for the daily cap)
-        if self.live:
+        self._spent = 0.0       # USD spent on BUYs this run (for the daily cap)
+        self._err = ""          # last connection error (e.g. no key)
+        print("  [trader] ready — live mode is controlled at runtime by the dashboard "
+              "toggle, and requires a configured key.")
+
+    def _ensure_connected(self) -> bool:
+        """Lazily connect on the first live order. Returns False (no order placed) if a
+        key isn't configured or the connection fails — so flipping the toggle on without a
+        key can never silently misfire."""
+        if self.client is not None:
+            return True
+        try:
             self._connect()
-            print("  [trader] LIVE TRADING ENABLED — real orders will be placed.")
-        else:
-            print("  [trader] dry-run mode — no real orders will be placed.")
+            return True
+        except Exception as exc:
+            self._err = str(exc)[:90]
+            return False
 
     # --- setup --------------------------------------------------------------
 
@@ -73,19 +83,19 @@ class Executor:
     # --- order execution ----------------------------------------------------
 
     def execute(self, token_id: str, side: str, usd_amount: float, shares: float,
-                fresh: bool = True) -> dict:
+                fresh: bool = True, live: bool = False) -> dict:
         """Place (or simulate) a market order mirroring a copied trade.
 
-        BUY amount is in USD (capped); SELL amount is in shares. `fresh` must be True for
-        a real order — stale/backfilled trades are never live-copied. Returns a dict with
-        the EXEC_FIELDS describing the outcome. Never raises.
+        `live` is the runtime toggle (False -> dry-run, sends nothing). BUY amount is in
+        USD (capped); SELL amount is in shares. `fresh` must be True for a real order —
+        stale/backfilled trades are never live-copied. Never raises.
         """
         side = side.upper()
 
         # Per-order cap (USD): scale a too-large BUY down to the cap.
         amount_usd = min(usd_amount, config.LIVE_MAX_ORDER_USD) if side == "BUY" else 0.0
 
-        if not self.live or self.client is None:
+        if not live:
             rec = dict(_DRY)
             if side == "BUY" and usd_amount > config.LIVE_MAX_ORDER_USD:
                 rec["live_status"] = f"DRY_RUN(capped ${config.LIVE_MAX_ORDER_USD:g})"
@@ -96,6 +106,9 @@ class Executor:
 
         if side == "BUY" and self._spent + amount_usd > config.LIVE_DAILY_MAX_USD:
             return _blank("SKIPPED_DAILY_CAP")
+
+        if not self._ensure_connected():   # no key / connect failed -> place nothing
+            return _blank("LIVE_NO_KEY")
 
         try:
             from py_clob_client.clob_types import MarketOrderArgs, OrderType

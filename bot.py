@@ -45,7 +45,7 @@ def trade_id(t: dict) -> str:
 
 def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[str],
                        executor: Executor, scale_frac: float,
-                       source: str = "onchain") -> tuple[int, list[int]]:
+                       source: str = "onchain", live: bool = False) -> tuple[int, list[int]]:
     """Append any not-yet-seen trades as paper trades (and place live orders if enabled).
 
     `trades` must be oldest-first. `processed` is the set of dedupe keys (mutated as we
@@ -92,7 +92,8 @@ def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[s
         fresh = isinstance(lag, int) and 0 <= lag <= config.MAX_COPY_LAG_SECONDS
         placeable = fresh and paper_cost >= config.MIN_TRADE_USD
         exec_result = executor.execute(
-            token_id=asset, side=side, usd_amount=paper_cost, shares=paper_size, fresh=placeable)
+            token_id=asset, side=side, usd_amount=paper_cost, shares=paper_size,
+            fresh=placeable, live=live)
 
         sheets.append_trade({
             "trade_id": tid,
@@ -372,6 +373,17 @@ def update_peak_open(open_value: float, scale_pct: float) -> float:
     return peak
 
 
+def read_live() -> bool:
+    """Runtime live-trading flag for this tracker, set by the dashboard toggle and stored
+    in live_<NAME>.txt. Defaults to config.ENABLE_LIVE_TRADING (off) if unset."""
+    base = os.path.dirname(os.path.abspath(config.EXCEL_PATH))
+    path = os.path.join(base, f"live_{config.TARGET_NAME}.txt")
+    try:
+        return open(path).read().strip().lower() == "on"
+    except OSError:
+        return bool(config.ENABLE_LIVE_TRADING)
+
+
 def write_state_json(summary: dict, rows: list[dict]) -> None:
     """Write a small JSON snapshot (summary + positions) next to the Excel file, for the
     web dashboard to read. Atomic via temp-file rename so the dashboard never sees a
@@ -379,7 +391,7 @@ def write_state_json(summary: dict, rows: list[dict]) -> None:
     state = {
         "name": config.TARGET_NAME,
         "address": config.TARGET_ADDRESS,
-        "live": config.ENABLE_LIVE_TRADING,
+        "live": read_live(),
         "summary": summary,
         "positions": rows,
     }
@@ -395,11 +407,12 @@ def write_state_json(summary: dict, rows: list[dict]) -> None:
 
 
 def dataapi_pass(sheets: ExcelClient, limit: int, executor: Executor, scale_frac: float,
-                processed: set[str]) -> int:
+                processed: set[str], live: bool = False) -> int:
     """Backup source: poll the data API and log any trades on-chain missed. Same dedupe
     set, so trades already caught on-chain are not re-logged."""
     trades = list(reversed(pm.get_trades(config.TARGET_ADDRESS, limit=limit)))  # oldest-first
-    added, _ = process_new_trades(sheets, trades, processed, executor, scale_frac, source="dataapi")
+    added, _ = process_new_trades(sheets, trades, processed, executor, scale_frac,
+                                  source="dataapi", live=live)
     return added
 
 
@@ -451,19 +464,21 @@ def main() -> None:
     while True:
         try:
             sp = current_scale()
+            live_on = read_live()
             processed = sheets.read_processed_keys()
 
             # PRIMARY: on-chain, every loop (~2s) — copies fire within ~1-2s of the whale.
             onchain = detector.poll_once()
             if onchain:
                 process_new_trades(sheets, onchain, processed, executor, sp / 100.0,
-                                   source="onchain")
+                                   source="onchain", live=live_on)
 
             # BACKUP/SEED: the data API. Seeds history on the first loop, then reconciles
             # occasionally (catches anything on-chain missed); same dedupe -> no doubles.
+            # NB: backup trades are stale (lag > MAX_COPY_LAG) so they never place live orders.
             if first or (time.monotonic() - last_dataapi) >= config.DATAAPI_INTERVAL_SECONDS:
                 dataapi_pass(sheets, first_limit if first else config.TRADES_PER_POLL,
-                             executor, sp / 100.0, processed)
+                             executor, sp / 100.0, processed, live=live_on)
                 last_dataapi = time.monotonic()
 
             if first or (time.monotonic() - last_reprice) >= config.REPRICE_INTERVAL_SECONDS:
