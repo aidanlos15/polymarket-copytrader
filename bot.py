@@ -301,6 +301,7 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
             "status": status,
             "trade_time": trade_time,
             "trade_date": trade_date,
+            "first_ts": a["first_ts"],
             "net_paper_size": round(net, 6),
             "total_bought": round(a["total_bought"], 6),
             "avg_entry_price": round(avg_entry, 6),
@@ -316,8 +317,8 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
             "token_id": token,
             "condition_id": a["condition_id"],
         })
-    # Open positions first, then by P&L.
-    rows.sort(key=lambda r: (r["status"] == "RESOLVED", -r["pnl"]))
+    # Most recently opened first (by entry timestamp).
+    rows.sort(key=lambda r: r.get("first_ts", 0), reverse=True)
     # Daily realized P&L, most-recent-day first (8th, 7th, 6th, ...). Sums to total realized.
     daily_series = sorted(daily_realized.items(), key=lambda kv: kv[0], reverse=True)[:30]
     today_pnl = daily_realized.get(today_str, 0.0)
