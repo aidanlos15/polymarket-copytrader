@@ -112,8 +112,13 @@ python onchain_detector.py
 Set `POLYGON_HTTP` to a free **Alchemy/Infura** Polygon endpoint for reliability (the
 default public RPC is flaky under load). `ONCHAIN_POLL_SECONDS` tunes the poll cadence.
 
-> Status: detector + decode built and verified. Wiring it in as the bot's primary trade
-> source (replacing the slow data-API poll, with cross-source dedupe) is the next step.
+**Wired in as the PRIMARY source.** `bot.py` polls the detector every `ONCHAIN_POLL_SECONDS`
+(default 2s) and copies trades within ~1–2s. The data API runs only as a **backup**
+(`DATAAPI_INTERVAL_SECONDS`, default 60s) to catch anything on-chain missed. Cross-source
+**dedupe** keys on `tx_hash:asset` (derived from existing columns), so a trade seen on-chain
+and later echoed by the API logs exactly once. Each Trades row records its `source`
+(`onchain`/`dataapi`) and `detect_lag_s`. Set `POLYGON_HTTP` (in `.env`) to your Alchemy
+endpoint — measured live detection lag with it: **0–3 seconds** (vs. 200–500s on the API).
 
 ---
 

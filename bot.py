@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 import config
 import polymarket_client as pm
 from excel_client import ExcelClient
+from onchain_detector import OnchainDetector
 from trader import Executor
 
 
@@ -36,24 +37,25 @@ def _now_iso() -> str:
 
 
 def trade_id(t: dict) -> str:
-    """Stable unique key for a fill. One tx can contain several fills, so include
-    asset, outcomeIndex and timestamp alongside the transaction hash."""
-    return ":".join(str(t.get(k, "")) for k in
-                     ("transactionHash", "asset", "outcomeIndex", "timestamp"))
+    """Source-independent dedupe key. Keyed on transaction hash + outcome token so the
+    SAME trade detected on-chain and later echoed by the data API maps to one key
+    (their timestamps differ, so timestamp must NOT be part of the key)."""
+    return f"{t.get('transactionHash', '')}:{t.get('asset', '')}"
 
 
 def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[str],
-                       executor: Executor, scale_frac: float) -> tuple[int, list[int]]:
-    """Append any not-yet-seen trades as paper trades.
+                       executor: Executor, scale_frac: float,
+                       source: str = "onchain") -> tuple[int, list[int]]:
+    """Append any not-yet-seen trades as paper trades (and place live orders if enabled).
 
-    Returns (count_added, detect_lags). detect_lag_s = how stale the feed was when we
-    saw each trade = our log time minus the trade's on-chain timestamp (indexer lag +
-    our own poll phase). Trades arrive newest-first; we process oldest-first.
+    `trades` must be oldest-first. `processed` is the set of dedupe keys (mutated as we
+    log). `source` ("onchain"/"dataapi") is recorded per trade. Returns (count_added,
+    detect_lags) where detect_lag_s = our log time minus the trade's on-chain timestamp.
     """
     added = 0
     skipped = 0
     lags: list[int] = []
-    for t in reversed(trades):
+    for t in trades:
         tid = trade_id(t)
         if tid in processed:
             continue
@@ -110,12 +112,14 @@ def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[s
             "paper_cost": round(paper_cost, 6),
             "tx_hash": t.get("transactionHash", ""),
             "detect_lag_s": lag,
+            "source": source,
             **exec_result,
         })
         processed.add(tid)
         added += 1
-        print(f"  + {side} {paper_size:.4f} @ {entry:.4f} [{exec_result['live_status']}]  "
-              f"{t.get('title','')[:46]}")
+        lag_txt = f"{lag}s" if isinstance(lag, int) else "?"
+        print(f"  + [{source} {lag_txt}] {side} {paper_size:.4f} @ {entry:.4f} "
+              f"[{exec_result['live_status']}]  {t.get('title','')[:42]}")
     # Only mention skipped dust when we also logged something, to avoid spamming the
     # log on every routine detect pass (the latest-N window always has a few sub-$1s).
     if skipped and added:
@@ -337,18 +341,12 @@ def write_state_json(summary: dict, rows: list[dict]) -> None:
         print(f"  [state] could not write {path}: {exc}")
 
 
-def detect_pass(sheets: ExcelClient, limit: int, executor: Executor, scale_frac: float) -> int:
-    """Cheap pass: poll /trades and log any new ones. Reports detection lag."""
-    processed = sheets.read_processed_trade_ids()
-    trades = pm.get_trades(config.TARGET_ADDRESS, limit=limit)
-    added, lags = process_new_trades(sheets, trades, processed, executor, scale_frac)
-    if added:
-        if lags:
-            print(f"  logged {added} new | detect lag s: "
-                  f"median {int(statistics.median(lags))}, "
-                  f"min {min(lags)}, max {max(lags)}")
-        else:
-            print(f"  logged {added} new paper trade(s)")
+def dataapi_pass(sheets: ExcelClient, limit: int, executor: Executor, scale_frac: float,
+                processed: set[str]) -> int:
+    """Backup source: poll the data API and log any trades on-chain missed. Same dedupe
+    set, so trades already caught on-chain are not re-logged."""
+    trades = list(reversed(pm.get_trades(config.TARGET_ADDRESS, limit=limit)))  # oldest-first
+    added, _ = process_new_trades(sheets, trades, processed, executor, scale_frac, source="dataapi")
     return added
 
 
@@ -360,10 +358,12 @@ def main() -> None:
     args = ap.parse_args()
 
     print(f"Tracking @{config.TARGET_NAME} ({config.TARGET_ADDRESS}) "
-          f"| detect {config.DETECT_INTERVAL_SECONDS}s | reprice {config.REPRICE_INTERVAL_SECONDS}s")
+          f"| on-chain poll {config.ONCHAIN_POLL_SECONDS}s | reprice {config.REPRICE_INTERVAL_SECONDS}s")
     sheets = ExcelClient()
     print(f"Writing to {config.EXCEL_PATH}")
     executor = Executor()
+    detector = OnchainDetector()
+    print(f"On-chain detection via {config.POLYGON_HTTP.split('/v2/')[0]}/v2/***")
 
     # Scale comes from the editable SCALE % cell in the Excel; fall back to config and
     # keep the last good value if the cell is unreadable (e.g. the file is open in Excel).
@@ -382,24 +382,38 @@ def main() -> None:
 
     if args.once:
         sp = current_scale()
-        detect_pass(sheets, first_limit, executor, sp / 100.0)
+        processed = sheets.read_processed_keys()
+        dataapi_pass(sheets, first_limit, executor, sp / 100.0, processed)
         mark_to_market(sheets, sp)
         return
 
     first = True
-    last_reprice = 0.0
+    last_reprice = last_dataapi = 0.0
     while True:
         try:
             sp = current_scale()
-            detect_pass(sheets, first_limit if first else config.TRADES_PER_POLL, executor, sp / 100.0)
-            # Re-price on the first loop, then only every REPRICE_INTERVAL seconds.
+            processed = sheets.read_processed_keys()
+
+            # PRIMARY: on-chain, every loop (~2s) — copies fire within ~1-2s of the whale.
+            onchain = detector.poll_once()
+            if onchain:
+                process_new_trades(sheets, onchain, processed, executor, sp / 100.0,
+                                   source="onchain")
+
+            # BACKUP/SEED: the data API. Seeds history on the first loop, then reconciles
+            # occasionally (catches anything on-chain missed); same dedupe -> no doubles.
+            if first or (time.monotonic() - last_dataapi) >= config.DATAAPI_INTERVAL_SECONDS:
+                dataapi_pass(sheets, first_limit if first else config.TRADES_PER_POLL,
+                             executor, sp / 100.0, processed)
+                last_dataapi = time.monotonic()
+
             if first or (time.monotonic() - last_reprice) >= config.REPRICE_INTERVAL_SECONDS:
                 mark_to_market(sheets, sp)
                 last_reprice = time.monotonic()
             first = False
         except Exception as exc:  # keep the loop alive across transient failures
             print(f"  cycle error: {exc!r}")
-        time.sleep(config.DETECT_INTERVAL_SECONDS)
+        time.sleep(config.ONCHAIN_POLL_SECONDS)
 
 
 if __name__ == "__main__":

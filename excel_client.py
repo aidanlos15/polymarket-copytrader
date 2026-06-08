@@ -30,7 +30,7 @@ TRADES_HEADER = [
     "side", "token_id", "condition_id", "rn1_size", "rn1_price", "scale_ratio",
     "paper_size", "paper_entry_price", "paper_cost", "tx_hash",
     "current_price", "current_value", "pnl", "pnl_updated", "detect_lag_s",
-    "live_status", "live_order_id", "live_filled", "live_avg_price",
+    "live_status", "live_order_id", "live_filled", "live_avg_price", "source",
 ]
 
 # Aggregated per-token view. Rebuilt from scratch each cycle, so order is free to be
@@ -79,7 +79,7 @@ _TRADES_HIDE = {"trade_id", "slug", "token_id", "condition_id", "tx_hash", "trad
 _WIDTHS = {
     "market_title": 42, "outcome": 20, "side": 7, "detected_at": 19, "pnl_updated": 19,
     "last_updated": 19, "price_source": 13, "token_id": 22, "condition_id": 22,
-    "detect_lag_s": 12, "status": 11,
+    "detect_lag_s": 12, "status": 11, "source": 9,
 }
 _DEFAULT_WIDTH = 13
 
@@ -91,7 +91,19 @@ class ExcelClient:
     def __init__(self) -> None:
         self.path = config.EXCEL_PATH
         if os.path.exists(self.path):
-            self._wb = load_workbook(self.path)
+            try:
+                self._wb = load_workbook(self.path)
+            except Exception as exc:
+                # Corrupt file (e.g. a kill mid-write before atomic saves) — don't
+                # crash-loop: set it aside and start a fresh workbook.
+                bad = self.path + ".corrupt"
+                print(f"  [excel] '{self.path}' unreadable ({exc!r}); moved to {bad}, starting fresh")
+                try:
+                    os.replace(self.path, bad)
+                except OSError:
+                    pass
+                self._wb = Workbook()
+                self._wb.remove(self._wb.active)
         else:
             self._wb = Workbook()
             self._wb.remove(self._wb.active)
@@ -118,19 +130,42 @@ class ExcelClient:
         return ws
 
     def _save(self) -> None:
+        """Atomic save: write to a temp file, then os.replace() into place. A crash/kill
+        mid-write only ever damages the temp file, never the real workbook."""
+        tmp = self.path + ".saving.tmp"
         try:
-            self._wb.save(self.path)
+            self._wb.save(tmp)
+            os.replace(tmp, self.path)
         except PermissionError:
             print(f"  [excel] cannot save — is '{self.path}' open in Excel? Will retry next cycle.")
+            self._cleanup(tmp)
+        except Exception as exc:  # never let a save error kill the loop
+            print(f"  [excel] save error: {exc!r}")
+            self._cleanup(tmp)
+
+    @staticmethod
+    def _cleanup(path: str) -> None:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
     # --- Trades log ---------------------------------------------------------
 
-    def read_processed_trade_ids(self) -> set[str]:
-        ids: set[str] = set()
-        for row in self._trades.iter_rows(min_row=2, max_col=1, values_only=True):
-            if row[0] is not None:
-                ids.add(str(row[0]))
-        return ids
+    def read_processed_keys(self) -> set[str]:
+        """Source-independent dedupe keys (tx_hash:token_id) derived from existing rows,
+        so a trade seen on-chain and later echoed by the data API logs only once — and
+        historical rows (logged under the old key format) still dedupe correctly."""
+        tx_i = TRADES_HEADER.index("tx_hash")
+        tok_i = TRADES_HEADER.index("token_id")
+        keys: set[str] = set()
+        for vals in self._trades.iter_rows(min_row=2, values_only=True):
+            if vals[0] is None:
+                continue
+            tx = vals[tx_i] if tx_i < len(vals) else ""
+            tok = vals[tok_i] if tok_i < len(vals) else ""
+            keys.add(f"{tx}:{tok}")
+        return keys
 
     def read_scale_pct(self) -> float | None:
         """Read the user-editable SCALE % from the file ON DISK (so manual edits in

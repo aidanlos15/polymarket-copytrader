@@ -37,6 +37,8 @@ POLL_INTERVAL_SECONDS: int = int(_get("POLL_INTERVAL_SECONDS", "30"))  # legacy 
 # (expensive — one CLOB call per market). Detection drives entry timing.
 DETECT_INTERVAL_SECONDS: int = int(_get("DETECT_INTERVAL_SECONDS", "7"))
 REPRICE_INTERVAL_SECONDS: int = int(_get("REPRICE_INTERVAL_SECONDS", "45"))
+# How often the data-API backup source reconciles (on-chain is primary, every poll).
+DATAAPI_INTERVAL_SECONDS: int = int(_get("DATAAPI_INTERVAL_SECONDS", "60"))
 TRADES_PER_POLL: int = int(_get("TRADES_PER_POLL", "200"))
 
 # --- Local Excel datastore --------------------------------------------------

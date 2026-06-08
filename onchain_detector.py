@@ -87,7 +87,7 @@ def lookup_market(token_id: str) -> dict:
     """token id -> {conditionId, title, outcome, slug} via Gamma (cached). Best-effort."""
     if token_id in _market_cache:
         return _market_cache[token_id]
-    info = {"conditionId": "", "title": "", "outcome": "", "slug": ""}
+    info = {"conditionId": "", "title": "", "outcome": "", "slug": "", "outcomeIndex": 0}
     try:
         j = requests.get("https://gamma-api.polymarket.com/markets",
                          params={"clob_token_ids": token_id}, timeout=8).json()
@@ -97,7 +97,8 @@ def lookup_market(token_id: str) -> dict:
             outs = json.loads(m.get("outcomes", "[]"))
             idx = ids.index(token_id) if token_id in ids else 0
             info = {"conditionId": m.get("conditionId", ""), "title": m.get("question", ""),
-                    "outcome": outs[idx] if idx < len(outs) else "", "slug": m.get("slug", "")}
+                    "outcome": outs[idx] if idx < len(outs) else "", "slug": m.get("slug", ""),
+                    "outcomeIndex": idx}
     except (requests.RequestException, ValueError, KeyError):
         pass
     _market_cache[token_id] = info
@@ -105,12 +106,12 @@ def lookup_market(token_id: str) -> dict:
 
 
 class OnchainDetector:
-    def __init__(self, on_trade=None) -> None:
+    def __init__(self) -> None:
         self.whale = config.TARGET_ADDRESS.lower()
         self.padded = "0x" + "0" * 24 + self.whale[2:]
-        self.on_trade = on_trade
         self.seen_tx: set[str] = set()
         self._block_time: dict[str, int] = {}
+        self._last: int | None = None   # last polled block
 
     def _rpc(self, method: str, params: list):
         r = requests.post(config.POLYGON_HTTP,
@@ -136,38 +137,56 @@ class OnchainDetector:
                 logs += r
         return logs
 
-    def _handle_tx(self, txh: str, block_hex: str) -> None:
-        if txh in self.seen_tx:
-            return
-        self.seen_tx.add(txh)
-        rcpt = self._rpc("eth_getTransactionReceipt", [txh])
-        if not rcpt:
-            return
-        ts = self._block_ts(block_hex) or int(time.time())
-        for tr in decode_trades(rcpt, self.whale):
-            tr.update(lookup_market(tr["asset"]))
-            tr["timestamp"] = ts
-            tr["transactionHash"] = txh
-            lag = int(time.time()) - ts
-            print(f"[onchain] {tr['side']} {tr['size']} @ {tr['price']} "
-                  f"{tr['title'][:42]} | detect lag {lag}s")
-            if self.on_trade:
-                self.on_trade(tr)
+    def poll_once(self) -> list[dict]:
+        """Non-blocking: scan blocks since the last poll, return new decoded trades.
+
+        Each trade is a dict with the same field names the data-API path uses (asset,
+        side, size, price, conditionId, title, outcome, outcomeIndex, timestamp,
+        transactionHash). Safe to call in a loop; never raises (returns [] on RPC error).
+        On the first call it just records the chain head and returns [] (start forward)."""
+        try:
+            latest = int(self._rpc("eth_blockNumber", []), 16)
+        except Exception:
+            return []
+        if self._last is None:
+            self._last = latest
+            return []
+        if latest <= self._last:
+            return []
+        try:
+            logs = self._get_logs(self._last + 1, latest)
+        except Exception:
+            return []
+        self._last = latest
+
+        txs: dict[str, str] = {}
+        for l in logs:
+            txs.setdefault(l["transactionHash"], l["blockNumber"])
+        out = []
+        for txh, bn in sorted(txs.items(), key=lambda kv: int(kv[1], 16)):
+            if txh in self.seen_tx:
+                continue
+            self.seen_tx.add(txh)
+            rcpt = self._rpc("eth_getTransactionReceipt", [txh])
+            if not rcpt:
+                continue
+            ts = self._block_ts(bn) or int(time.time())
+            for tr in decode_trades(rcpt, self.whale):
+                tr.update(lookup_market(tr["asset"]))
+                tr["timestamp"] = ts
+                tr["transactionHash"] = txh
+                out.append(tr)
+        return out
 
     def run(self, from_block: int | None = None) -> None:
-        last = from_block if from_block is not None else int(self._rpc("eth_blockNumber", []), 16)
-        print(f"[onchain] polling @{config.TARGET_NAME} trades from block {last} "
-              f"every {config.ONCHAIN_POLL_SECONDS}s")
+        self._last = from_block
+        print(f"[onchain] polling @{config.TARGET_NAME} trades every "
+              f"{config.ONCHAIN_POLL_SECONDS}s")
         while True:
-            try:
-                latest = int(self._rpc("eth_blockNumber", []), 16)
-                if latest > last:
-                    for l in sorted(self._get_logs(last + 1, latest),
-                                    key=lambda x: int(x["blockNumber"], 16)):
-                        self._handle_tx(l["transactionHash"], l["blockNumber"])
-                    last = latest
-            except Exception as exc:
-                print(f"[onchain] error: {exc!r}")
+            for tr in self.poll_once():
+                lag = int(time.time()) - tr["timestamp"]
+                print(f"[onchain] {tr['side']} {tr['size']} @ {tr['price']} "
+                      f"{tr['title'][:42]} | detect lag {lag}s")
             time.sleep(config.ONCHAIN_POLL_SECONDS)
 
 
