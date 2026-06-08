@@ -335,6 +335,7 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
         "realized_pnl": round(realized_pnl, 4),
         "unrealized_pnl": round(unrealized_pnl, 4),
         "portfolio_value": round(portfolio_value, 4),
+        "peak_open_value": round(update_peak_open(portfolio_value, scale_pct), 4),
         "open_count": open_count,
         "resolved_count": resolved_count,
         "priced_count": priced,
@@ -347,6 +348,28 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
     print(f"  scale {scale_pct:g}% | counted {priced} (hidden <$1: {hidden}, unpriced {unpriced}) "
           f"| open {open_count} (value ${portfolio_value:,.2f}) | "
           f"resolved {resolved_count} (real ${realized_pnl:,.2f}) | total P&L ${total_pnl:,.2f}")
+
+
+def update_peak_open(open_value: float, scale_pct: float) -> float:
+    """High-water mark of the OPEN-positions value — the most capital ever tied up in
+    open positions at once, i.e. the cash you need available to fund the strategy.
+    Persisted in peak_<NAME>.json; resets if the scale changes (a different funding size)."""
+    base = os.path.dirname(os.path.abspath(config.EXCEL_PATH))
+    path = os.path.join(base, f"peak_{config.TARGET_NAME}.json")
+    peak = open_value
+    try:
+        d = json.load(open(path))
+        if round(float(d.get("scale", -1))) == round(scale_pct):
+            peak = max(float(d.get("peak", 0)), open_value)
+    except (OSError, ValueError, TypeError):
+        pass
+    try:
+        with open(path + ".tmp", "w") as fh:
+            json.dump({"scale": round(scale_pct), "peak": peak}, fh)
+        os.replace(path + ".tmp", path)
+    except OSError:
+        pass
+    return peak
 
 
 def write_state_json(summary: dict, rows: list[dict]) -> None:

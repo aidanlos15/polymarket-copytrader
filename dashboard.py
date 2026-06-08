@@ -92,7 +92,8 @@ h1 { font-size:18px; margin:0 0 2px; }
 form.scale { display:inline-flex; gap:6px; align-items:center; margin:0; }
 input[type=number] { width:64px; padding:5px 6px; border:1px solid #d0d7de; border-radius:6px; font:inherit; }
 .hint { color:#8c959f; font-size:11px; }
-.cards { display:grid; grid-template-columns:repeat(7,1fr); gap:10px; margin-bottom:14px; }
+.cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(135px, 1fr)); gap:10px; margin-bottom:14px; }
+.card.peak { background:#fff8c5; border-color:#d4a72c; }
 .daily { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:14px; }
 .day { display:inline-block; background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:4px 9px; text-align:center; text-decoration:none; color:inherit; cursor:pointer; }
 .day:hover { border-color:#0969da; }
@@ -150,6 +151,7 @@ def _render_tracker(s: dict, scale_val: int, date_filter: str = "") -> str:
         ("Unrealized · open", _money(summ.get("unrealized_pnl", 0)), cardcls(summ.get("unrealized_pnl", 0))),
         ("Total Spent", _money(summ.get("total_cost", 0)), ""),
         ("Portfolio Value · open", _money(summ.get("portfolio_value", 0)), ""),
+        ("Peak Open · cash to fund", _money(summ.get("peak_open_value", 0)), "peak"),
         ("Open / Resolved", f"{summ.get('open_count',0)} / {summ.get('resolved_count',0)}", ""),
     ]
     card_html = "".join(
