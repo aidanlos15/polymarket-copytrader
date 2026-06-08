@@ -216,11 +216,13 @@ class ExcelClient:
         def signfill(v):
             return GREEN if v > 0 else (RED if v < 0 else BLUE)
         pnl = summary.get("total_pnl", 0) or 0
+        today = summary.get("today_pnl", 0) or 0
         real = summary.get("realized_pnl", 0) or 0
         unreal = summary.get("unrealized_pnl", 0) or 0
         oc, rc = summary.get("open_count", 0), summary.get("resolved_count", 0)
         cards = [
             ("TOTAL P&L", pnl, _CCY, signfill(pnl)),
+            ("TODAY'S P&L", today, _CCY, signfill(today)),
             ("REALIZED · resolved", real, _CCY, signfill(real)),
             ("UNREALIZED · open", unreal, _CCY, signfill(unreal)),
             ("TOTAL SPENT", summary.get("total_cost", 0), _CCY, BLUE),
@@ -270,8 +272,26 @@ class ExcelClient:
         ws.merge_cells(start_row=5, start_column=3, end_row=5, end_column=ncols)
         ws.row_dimensions[5].height = 22
 
-        # Row 6 spacer, Row 7 table header, Row 8+ data
-        header_row = 7
+        # Rows 6-7: per-day P&L strip — most recent days (date on row 6, daily P&L on row 7).
+        daily = summary.get("daily", [])[-(ncols - 1):]   # fit B.. across the sheet
+        dl = ws.cell(6, 1, "DAILY P&L →")
+        dl.font = Font(bold=True, size=10, color="9CC3FF")
+        dl.alignment = Alignment(horizontal="right", vertical="center")
+        for j, (d, p) in enumerate(daily):
+            col = 2 + j
+            dc = ws.cell(6, col, d[5:])                   # MM-DD
+            dc.font = Font(size=9, color="9CA3AF")
+            dc.alignment = Alignment(horizontal="center")
+            vc = ws.cell(7, col, round(p, 2))
+            vc.number_format = _CCY
+            vc.font = Font(bold=True, size=10,
+                           color=GREEN_TXT if p > 0 else (RED_TXT if p < 0 else "9CA3AF"))
+            vc.alignment = Alignment(horizontal="center")
+        ws.row_dimensions[6].height = 14
+        ws.row_dimensions[7].height = 16
+
+        # Row 8 spacer, Row 9 table header, Row 10+ data
+        header_row = 9
         for i, h in enumerate(POSITIONS_HEADER, start=1):
             cell = ws.cell(header_row, i, h)
             cell.font = Font(bold=True, size=10, color="FFFFFF")

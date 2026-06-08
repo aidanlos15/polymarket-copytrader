@@ -215,6 +215,13 @@ These per-trade figures are written back onto the **Trades** sheet (`current_pri
 `current_value`, `pnl`, `pnl_updated`) and aggregated per token on the **Positions**
 sheet (`pnl`, `pnl_pct`). The SUMMARY row totals everything — the two sheets always agree.
 
+**Daily P&L + Today's P&L.** The dashboard has a **TODAY'S P&L** card (next to TOTAL P&L)
+and a **DAILY P&L** strip showing each day's result. Daily P&L = the *change* in total
+P&L over that calendar day, so a finished day is fixed once it closes (computed once and
+persisted in `daily_<name>.json`), while today's keeps updating live. The first day is
+measured from a baseline captured at start, so the one-time backfill isn't counted as a
+single day's gain.
+
 **Price source — works for every market, even closed ones.** Prices come from
 `GET /markets/<conditionId>`, which returns each outcome token's current price for
 *active* markets (live) **and** *closed/resolved* markets (→ $1 won / $0 lost) — unlike

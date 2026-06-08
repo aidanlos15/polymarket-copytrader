@@ -63,7 +63,11 @@ body { margin:0; background:#0d1117; color:#e6edf3; font:14px/1.5 -apple-system,
 h1 { font-size:18px; margin:0 0 2px; }
 .sub { color:#8b949e; font-size:12px; margin-bottom:14px; }
 .live { color:#f0883e; font-weight:700; }
-.cards { display:grid; grid-template-columns:repeat(6,1fr); gap:10px; margin-bottom:18px; }
+.cards { display:grid; grid-template-columns:repeat(7,1fr); gap:10px; margin-bottom:14px; }
+.daily { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:18px; }
+.day { background:#161b22; border:1px solid #30363d; border-radius:6px; padding:4px 9px; text-align:center; }
+.day .d { color:#8b949e; font-size:10px; }
+.day .v { font-size:12px; font-weight:700; }
 .card { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:12px 14px; }
 .card .label { color:#8b949e; font-size:10px; letter-spacing:.04em; text-transform:uppercase; }
 .card .val { font-size:20px; font-weight:700; margin-top:4px; }
@@ -86,13 +90,17 @@ def _render_tracker(s: dict) -> str:
     summ = s.get("summary", {})
     name = s.get("name", "?")
     live = '<span class="live">LIVE</span>' if s.get("live") else "paper (dry-run)"
+    def cardcls(x):
+        return "green" if _cls(x) == "pos" else ("red" if _cls(x) == "neg" else "")
     tp = summ.get("total_pnl", 0)
+    today = summ.get("today_pnl", 0)
     real = summ.get("realized_pnl", 0)
     unreal = summ.get("unrealized_pnl", 0)
     cards = [
-        ("Total P&L", _money(tp), "green" if _cls(tp) == "pos" else ("red" if _cls(tp) == "neg" else "")),
-        ("Realized · resolved", _money(real), "green" if _cls(real) == "pos" else ("red" if _cls(real) == "neg" else "")),
-        ("Unrealized · open", _money(unreal), "green" if _cls(unreal) == "pos" else ("red" if _cls(unreal) == "neg" else "")),
+        ("Total P&L", _money(tp), cardcls(tp)),
+        ("Today's P&L", _money(today), cardcls(today)),
+        ("Realized · resolved", _money(real), cardcls(real)),
+        ("Unrealized · open", _money(unreal), cardcls(unreal)),
         ("Total Spent", _money(summ.get("total_cost", 0)), ""),
         ("Portfolio Value · open", _money(summ.get("portfolio_value", 0)), ""),
         ("Open / Resolved", f"{summ.get('open_count',0)} / {summ.get('resolved_count',0)}", ""),
@@ -100,6 +108,14 @@ def _render_tracker(s: dict) -> str:
     card_html = "".join(
         f'<div class="card {c}"><div class="label">{l}</div><div class="val">{v}</div></div>'
         for l, v, c in cards)
+
+    daily = summ.get("daily", [])[-14:]
+    daily_html = ""
+    if daily:
+        chips = "".join(
+            f'<div class="day"><div class="d">{d[5:]}</div>'
+            f'<div class="v {_cls(p)}">{_money(p)}</div></div>' for d, p in daily)
+        daily_html = f'<div class="daily">{chips}</div>'
 
     rows = s.get("positions", [])
     body = []
@@ -123,6 +139,7 @@ def _render_tracker(s: dict) -> str:
         · Return {summ.get('total_pnl_pct',0):.2f}% · {summ.get('priced_count',0)} counted,
         {summ.get('hidden_count',0)} hidden &lt;$1{note}</div>
       <div class="cards">{card_html}</div>
+      {daily_html}
       <table>
         <tr><th class="l">Market</th><th class="l">Outcome</th><th>Status</th><th>Size</th>
             <th>Avg Entry</th><th>Cur Price</th><th>Value</th><th>P&L</th></tr>
