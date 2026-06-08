@@ -239,12 +239,15 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
         a["condition_id"] = cid
         a["cur_price"] = cur
         a["pnl"] += pnl
-        # Detection lag for this token (averaged across its trades).
-        try:
-            a["lag_sum"] += float(t.get("detect_lag_s"))
-            a["lag_n"] += 1
-        except (TypeError, ValueError):
-            pass
+        # Detection lag — ONLY for live on-chain copies (the real copy latency). Trades
+        # imported via the data-API backfill have a misleading "age at import" lag, so
+        # they're excluded; a position with no live-copied trades shows a blank lag.
+        if str(t.get("source", "")).lower() == "onchain":
+            try:
+                a["lag_sum"] += float(t.get("detect_lag_s"))
+                a["lag_n"] += 1
+            except (TypeError, ValueError):
+                pass
         # Entry timestamp = earliest trade on this token.
         try:
             ts = int(float(t.get("trade_ts") or 0))
