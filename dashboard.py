@@ -105,6 +105,7 @@ input[type=number] { width:64px; padding:5px 6px; border:1px solid #d0d7de; bord
 .card .val { font-size:20px; font-weight:700; margin-top:4px; }
 .card.green { background:#dafbe1; border-color:#2da44e; }
 .card.red { background:#ffebe9; border-color:#cf222e; }
+.tablewrap { overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:10px; }
 table { width:100%; border-collapse:collapse; background:#ffffff; border:1px solid #d0d7de; border-radius:10px; overflow:hidden; }
 th,td { padding:7px 10px; text-align:right; border-bottom:1px solid #d8dee4; white-space:nowrap; }
 th { background:#f6f8fa; color:#656d76; font-size:11px; text-transform:uppercase; position:sticky; top:0; }
@@ -114,6 +115,23 @@ tr:hover td { background:#f6f8fa; }
 .tag { font-size:10px; padding:1px 7px; border-radius:10px; }
 .tag.OPEN { background:#dafbe1; color:#1a7f37; } .tag.RESOLVED { background:#eaeef2; color:#656d76; }
 .foot { color:#8c959f; font-size:11px; margin-top:18px; }
+
+/* --- Mobile (iPhone-width and below): reflow so it fits neatly --- */
+@media (max-width: 480px) {
+  .wrap { padding:12px; }
+  .topbar { flex-direction:column; align-items:flex-start; gap:8px; }
+  .topbar h1 { font-size:16px; }
+  .toggle a { padding:8px 22px; }              /* big tap targets */
+  .cards { grid-template-columns:repeat(2,1fr); gap:8px; }
+  .card { padding:10px 11px; }
+  .card .val { font-size:16px; }
+  .controls { gap:8px; }
+  .hint { display:none; }                       /* hide long hint to save space */
+  .daily { gap:5px; }
+  table { font-size:12px; }
+  th, td { padding:6px 8px; }
+  .banner { font-size:12px; }
+}
 """
 
 
@@ -193,12 +211,12 @@ def _render_tracker(s: dict, scale_val: int, date_filter: str = "") -> str:
       <div class="cards">{card_html}</div>
       {daily_html}
       {banner}
-      <table>
+      <div class="tablewrap"><table>
         <tr><th class="l">Market</th><th class="l">Outcome</th><th>Status</th><th class="l">Opened</th><th>Size</th>
             <th>Our Entry</th><th>Whale Entry</th><th>Cur Price</th><th>Value</th><th>P&L</th>
             <th>Lag s</th></tr>
         {''.join(body)}
-      </table>"""
+      </table></div>"""
 
 
 @app.route("/scale", methods=["POST"])
