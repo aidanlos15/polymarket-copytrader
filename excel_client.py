@@ -41,7 +41,13 @@ POSITIONS_HEADER = [
     "price_source", "last_updated", "token_id", "condition_id",
 ]
 
-TRADE_MARK_COLS = ["current_price", "current_value", "pnl", "pnl_updated"]
+# Per-cycle re-written columns on the Trades sheet (paper_size/cost change with scale).
+TRADE_MARK_COLS = ["paper_size", "paper_cost", "current_price", "current_value",
+                   "pnl", "pnl_updated"]
+
+# The editable "SCALE %" input cell on the Positions sheet (value the user types, 1-100).
+SCALE_LABEL_CELL = "A5"
+SCALE_INPUT_CELL = "B5"
 
 # --- styling palette --------------------------------------------------------
 NAVY = "1F3864"
@@ -126,6 +132,25 @@ class ExcelClient:
                 ids.add(str(row[0]))
         return ids
 
+    def read_scale_pct(self) -> float | None:
+        """Read the user-editable SCALE % from the file ON DISK (so manual edits in
+        Excel are picked up). Returns a float in [1, 100], or None if unset/invalid/
+        unreadable (e.g. the file is locked open in Excel)."""
+        if not os.path.exists(self.path):
+            return None
+        try:
+            wb = load_workbook(self.path, read_only=True, data_only=True)
+            try:
+                if "Positions" not in wb.sheetnames:
+                    return None
+                val = wb["Positions"][SCALE_INPUT_CELL].value
+            finally:
+                wb.close()
+            pct = float(val)
+            return pct if 1.0 <= pct <= 100.0 else None
+        except (OSError, ValueError, TypeError):
+            return None
+
     def append_trade(self, row: dict[str, Any]) -> None:
         self._trades.append([row.get(k, "") for k in TRADES_HEADER])
         self._save()
@@ -139,8 +164,8 @@ class ExcelClient:
         return out
 
     def update_trade_marks(self, marks_by_id: dict[str, dict]) -> None:
-        """Write the live mark-to-market columns onto each Trades row (matched by
-        trade_id), then re-apply styling."""
+        """Write the per-cycle columns onto each Trades row (matched by trade_id) and
+        hide rows that fall below the $1 minimum at the current scale, then re-style."""
         cols = {name: TRADES_HEADER.index(name) + 1 for name in TRADE_MARK_COLS}
         for row in range(2, self._trades.max_row + 1):
             tid = self._trades.cell(row=row, column=1).value
@@ -151,14 +176,17 @@ class ExcelClient:
                 continue
             for name, col in cols.items():
                 self._trades.cell(row=row, column=col, value=mk.get(name, ""))
+            # Hide the row when our scaled order is below the $1 minimum.
+            self._trades.row_dimensions[row].hidden = bool(mk.get("_hidden"))
         self._style_trades()
         self._save()
 
     # --- Positions / dashboard ---------------------------------------------
 
-    def write_positions(self, rows: list[dict[str, Any]], summary: dict[str, Any]) -> None:
-        """Rebuild the Positions sheet: a pinned summary dashboard on top, then the
-        per-token table. Frozen panes keep both visible while scrolling."""
+    def write_positions(self, rows: list[dict[str, Any]], summary: dict[str, Any],
+                        scale_pct: float = 1.0) -> None:
+        """Rebuild the Positions sheet: a pinned summary dashboard on top, an editable
+        SCALE % input, then the per-token table. Frozen panes keep it all visible."""
         ws = self._positions
         for mr in list(ws.merged_cells.ranges):
             ws.unmerge_cells(str(mr))
@@ -224,8 +252,26 @@ class ExcelClient:
         ws.row_dimensions[3].height = 15
         ws.row_dimensions[4].height = 26
 
-        # Row 5 spacer, Row 6 table header, Row 7+ data
-        header_row = 6
+        # Row 5: editable SCALE % control. The bot reads B5 each cycle and resizes every
+        # trade to it; trades whose scaled order is < $1 are hidden until you raise this.
+        lab = ws.cell(5, 1, "SCALE %  →")
+        lab.font = Font(bold=True, size=11, color="FFD966")
+        lab.alignment = Alignment(horizontal="right", vertical="center")
+        lab.fill = PatternFill("solid", fgColor="3A3000")
+        inp = ws.cell(5, 2, round(scale_pct))
+        inp.font = Font(bold=True, size=13, color="000000")
+        inp.alignment = Alignment(horizontal="center", vertical="center")
+        inp.fill = PatternFill("solid", fgColor="FFD966")   # yellow = editable
+        inp.border = _BORDER
+        inp.number_format = "0"
+        note = ws.cell(5, 3, "← type 1–100, then save the file (applies on the next refresh)")
+        note.font = Font(size=10, italic=True, color="8b949e")
+        note.alignment = Alignment(horizontal="left", vertical="center")
+        ws.merge_cells(start_row=5, start_column=3, end_row=5, end_column=ncols)
+        ws.row_dimensions[5].height = 22
+
+        # Row 6 spacer, Row 7 table header, Row 8+ data
+        header_row = 7
         for i, h in enumerate(POSITIONS_HEADER, start=1):
             cell = ws.cell(header_row, i, h)
             cell.font = Font(bold=True, size=10, color="FFFFFF")

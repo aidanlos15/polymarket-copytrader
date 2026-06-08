@@ -188,8 +188,19 @@ on-chain timestamp (Polymarket indexer lag + our poll phase). Watch this column 
 how stale the feed actually is — it sets the floor on how fast copying can ever be, and
 no faster polling can beat it.
 
-**Sizing:** scaled/proportional — `paper_size = rn1_size × SCALE_RATIO`. SELLs reduce
-held size (clamped, never short) and realize P&L; entries use a weighted average.
+**Sizing:** scaled/proportional — `paper_size = rn1_size × scale`. SELLs reduce held size
+(clamped, never short) and realize P&L; entries use a weighted average.
+
+**Editable SCALE % (in the Excel).** The Positions tab has a yellow input cell (**B5**,
+labelled `SCALE % →`) where you type a number **1–100**. The bot reads it every cycle and
+**re-sizes every trade — current and historical** — to that percentage. Type a value,
+**save the file** (and ideally close it so the bot can write back), and it applies on the
+next refresh (~within a cycle).
+
+Because the $1 minimum applies to *your scaled order* (Polymarket rejects sub-$1 orders),
+trades whose scaled value is below $1 are **hidden** (rows collapsed, excluded from P&L)
+and **reappear when you raise the scale**. At 1% only the whale's ≥$100 trades clear $1; at
+10% their ≥$10 trades do; etc. The dashboard header shows `Scale X% · … · N hidden <$1`.
 
 **Minimum trade filter:** trades whose value (`size × price`) is below `MIN_TRADE_USD`
 (default **$1**, Polymarket's order minimum) are skipped at ingestion — never logged,

@@ -119,8 +119,9 @@ def _render_tracker(s: dict) -> str:
     return f"""
     <div class="section">
       <h1>@{name} <span class="sub">· {live}</span></h1>
-      <div class="sub">Updated {summ.get('last_updated','')} · Return {summ.get('total_pnl_pct',0):.2f}%
-        · {summ.get('priced_count',0)} priced{note}</div>
+      <div class="sub">Updated {summ.get('last_updated','')} · Scale {summ.get('scale_pct',1):g}%
+        · Return {summ.get('total_pnl_pct',0):.2f}% · {summ.get('priced_count',0)} counted,
+        {summ.get('hidden_count',0)} hidden &lt;$1{note}</div>
       <div class="cards">{card_html}</div>
       <table>
         <tr><th class="l">Market</th><th class="l">Outcome</th><th>Status</th><th>Size</th>

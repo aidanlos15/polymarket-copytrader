@@ -42,8 +42,8 @@ def trade_id(t: dict) -> str:
                      ("transactionHash", "asset", "outcomeIndex", "timestamp"))
 
 
-def process_new_trades(sheets: ExcelClient, trades: list[dict],
-                       processed: set[str], executor: Executor) -> tuple[int, list[int]]:
+def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[str],
+                       executor: Executor, scale_frac: float) -> tuple[int, list[int]]:
     """Append any not-yet-seen trades as paper trades.
 
     Returns (count_added, detect_lags). detect_lag_s = how stale the feed was when we
@@ -75,7 +75,7 @@ def process_new_trades(sheets: ExcelClient, trades: list[dict],
             # Fall back to the price RN1 actually traded at if the book is unavailable.
             entry = float(t.get("price", 0) or 0)
 
-        paper_size = rn1_size * config.SCALE_RATIO
+        paper_size = rn1_size * scale_frac
         paper_cost = paper_size * entry
 
         try:
@@ -86,10 +86,11 @@ def process_new_trades(sheets: ExcelClient, trades: list[dict],
             lags.append(lag)
 
         # Place (or simulate, in dry-run) the live market order mirroring this trade.
-        # Only FRESH trades are ever live-copied (guards backfills / stale markets).
+        # Only live-copy FRESH trades whose scaled order clears Polymarket's $1 minimum.
         fresh = isinstance(lag, int) and 0 <= lag <= config.MAX_COPY_LAG_SECONDS
+        placeable = fresh and paper_cost >= config.MIN_TRADE_USD
         exec_result = executor.execute(
-            token_id=asset, side=side, usd_amount=paper_cost, shares=paper_size, fresh=fresh)
+            token_id=asset, side=side, usd_amount=paper_cost, shares=paper_size, fresh=placeable)
 
         sheets.append_trade({
             "trade_id": tid,
@@ -103,7 +104,7 @@ def process_new_trades(sheets: ExcelClient, trades: list[dict],
             "condition_id": t.get("conditionId", ""),
             "rn1_size": round(rn1_size, 4),
             "rn1_price": t.get("price", ""),
-            "scale_ratio": config.SCALE_RATIO,
+            "scale_ratio": round(scale_frac, 4),
             "paper_size": round(paper_size, 6),
             "paper_entry_price": round(entry, 6),
             "paper_cost": round(paper_cost, 6),
@@ -154,51 +155,66 @@ def fetch_current_prices(trade_rows: list[dict]) -> tuple[dict[str, float], dict
     return price_by_token, resolved_by_condition
 
 
-def mark_to_market(sheets: ExcelClient) -> None:
-    """Mark every logged trade to the current market price and recompute P&L.
+def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
+    """Re-size every trade to the current SCALE %, mark to market, and recompute P&L.
 
-    Per-trade P&L = paper_size * (current_price - entry) for a BUY (mirror for SELL).
-    Positions split into OPEN (still trading) and RESOLVED (market closed): resolved
-    positions are settled, so their P&L is *realized* and they are EXCLUDED from the
-    live portfolio value. Open positions' value is the portfolio value (unrealized P&L).
+    paper_size = rn1_size * (scale_pct/100); P&L = paper_size * (current - entry) for a
+    BUY (mirror for SELL). Trades whose scaled order is below Polymarket's $1 minimum are
+    HIDDEN and excluded from P&L/positions — raising the scale brings them back.
+    Positions split into OPEN (counts toward portfolio value / unrealized) and RESOLVED
+    (settled → realized P&L, excluded from portfolio value).
     """
     now = _now_iso()
+    scale_frac = scale_pct / 100.0
     trades = sheets.read_all_trades()
     price_by_token, resolved_by_condition = fetch_current_prices(trades)
 
-    marks: dict[str, dict] = {}                 # trade_id -> mark columns
+    marks: dict[str, dict] = {}                 # trade_id -> per-cycle columns
     agg: dict[str, dict] = defaultdict(lambda: {
         "net_paper_size": 0.0, "total_bought": 0.0, "cost_basis": 0.0, "pnl": 0.0,
         "market_title": "", "outcome": "", "condition_id": "", "cur_price": None,
     })
-    priced = unpriced = 0
+    priced = unpriced = hidden = 0
 
     for t in trades:
         tid = str(t.get("trade_id", ""))
         token = str(t.get("token_id", ""))
         cid = str(t.get("condition_id", ""))
         side = str(t.get("side", "BUY")).upper()
-        size = float(t.get("paper_size") or 0)
         entry = float(t.get("paper_entry_price") or 0)
+        rn1_size = float(t.get("rn1_size") or 0)
+        size = rn1_size * scale_frac            # re-sized to the current scale
+        cost = size * entry
         cur = price_by_token.get(token)
 
+        # Below the $1 minimum at this scale -> hide the row, exclude from P&L.
+        below_min = cost < config.MIN_TRADE_USD
+        if below_min:
+            hidden += 1
+
         if cur is None:
-            # No price available for this market — leave it blank, don't count it.
-            marks[tid] = {"current_price": "", "current_value": "", "pnl": "", "pnl_updated": now}
+            marks[tid] = {"paper_size": round(size, 6), "paper_cost": round(cost, 6),
+                          "current_price": "", "current_value": "", "pnl": "",
+                          "pnl_updated": now, "_hidden": below_min}
             unpriced += 1
             continue
 
-        priced += 1
         if side == "BUY":
             pnl = size * (cur - entry)
         else:  # SELL — profit if the price fell after we sold
             pnl = size * (entry - cur)
         marks[tid] = {
+            "paper_size": round(size, 6),
+            "paper_cost": round(cost, 6),
             "current_price": round(cur, 6),
             "current_value": round(size * cur if side == "BUY" else 0.0, 4),
             "pnl": round(pnl, 4),
             "pnl_updated": now,
+            "_hidden": below_min,
         }
+        if below_min:
+            continue                            # excluded from positions / P&L
+        priced += 1
 
         a = agg[token]
         a["market_title"] = t.get("market_title", a["market_title"])
@@ -272,11 +288,13 @@ def mark_to_market(sheets: ExcelClient) -> None:
         "resolved_count": resolved_count,
         "priced_count": priced,
         "unpriced_count": unpriced,
+        "hidden_count": hidden,
+        "scale_pct": round(scale_pct),
     }
-    sheets.write_positions(rows, summary)
+    sheets.write_positions(rows, summary, scale_pct=scale_pct)
     write_state_json(summary, rows)
-    print(f"  marked {priced} trades ({unpriced} unpriced) | open {open_count} "
-          f"(value ${portfolio_value:,.2f}, unreal ${unrealized_pnl:,.2f}) | "
+    print(f"  scale {scale_pct:g}% | counted {priced} (hidden <$1: {hidden}, unpriced {unpriced}) "
+          f"| open {open_count} (value ${portfolio_value:,.2f}) | "
           f"resolved {resolved_count} (real ${realized_pnl:,.2f}) | total P&L ${total_pnl:,.2f}")
 
 
@@ -302,11 +320,11 @@ def write_state_json(summary: dict, rows: list[dict]) -> None:
         print(f"  [state] could not write {path}: {exc}")
 
 
-def detect_pass(sheets: ExcelClient, limit: int, executor: Executor) -> int:
+def detect_pass(sheets: ExcelClient, limit: int, executor: Executor, scale_frac: float) -> int:
     """Cheap pass: poll /trades and log any new ones. Reports detection lag."""
     processed = sheets.read_processed_trade_ids()
     trades = pm.get_trades(config.TARGET_ADDRESS, limit=limit)
-    added, lags = process_new_trades(sheets, trades, processed, executor)
+    added, lags = process_new_trades(sheets, trades, processed, executor, scale_frac)
     if added:
         if lags:
             print(f"  logged {added} new | detect lag s: "
@@ -324,29 +342,42 @@ def main() -> None:
     ap.add_argument("--once", action="store_true", help="run one cycle and exit")
     args = ap.parse_args()
 
-    print(f"Tracking @{config.TARGET_NAME} ({config.TARGET_ADDRESS}) | scale {config.SCALE_RATIO} "
+    print(f"Tracking @{config.TARGET_NAME} ({config.TARGET_ADDRESS}) "
           f"| detect {config.DETECT_INTERVAL_SECONDS}s | reprice {config.REPRICE_INTERVAL_SECONDS}s")
     sheets = ExcelClient()
     print(f"Writing to {config.EXCEL_PATH}")
     executor = Executor()
+
+    # Scale comes from the editable SCALE % cell in the Excel; fall back to config and
+    # keep the last good value if the cell is unreadable (e.g. the file is open in Excel).
+    scale_pct = config.SCALE_RATIO * 100
+
+    def current_scale() -> float:
+        nonlocal scale_pct
+        v = sheets.read_scale_pct()
+        if v is not None:
+            scale_pct = v
+        return scale_pct
 
     # First detect pass fetches `--backfill N` trades (seed history); after that, the
     # normal per-poll window.
     first_limit = args.backfill if args.backfill else config.TRADES_PER_POLL
 
     if args.once:
-        detect_pass(sheets, first_limit, executor)
-        mark_to_market(sheets)
+        sp = current_scale()
+        detect_pass(sheets, first_limit, executor, sp / 100.0)
+        mark_to_market(sheets, sp)
         return
 
     first = True
     last_reprice = 0.0
     while True:
         try:
-            detect_pass(sheets, first_limit if first else config.TRADES_PER_POLL, executor)
+            sp = current_scale()
+            detect_pass(sheets, first_limit if first else config.TRADES_PER_POLL, executor, sp / 100.0)
             # Re-price on the first loop, then only every REPRICE_INTERVAL seconds.
             if first or (time.monotonic() - last_reprice) >= config.REPRICE_INTERVAL_SECONDS:
-                mark_to_market(sheets)
+                mark_to_market(sheets, sp)
                 last_reprice = time.monotonic()
             first = False
         except Exception as exc:  # keep the loop alive across transient failures
