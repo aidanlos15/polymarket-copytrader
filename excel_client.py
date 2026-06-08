@@ -301,7 +301,7 @@ class ExcelClient:
         inp.fill = PatternFill("solid", fgColor="FFD966")   # yellow = editable
         inp.border = _BORDER
         inp.number_format = "0"
-        note = ws.cell(5, 3, "← type 1–100, then save the file (applies on the next refresh)")
+        note = ws.cell(5, 3, "← set the scale on the web dashboard (1–100); shown here for reference")
         note.font = Font(size=10, italic=True, color="8b949e")
         note.alignment = Alignment(horizontal="left", vertical="center")
         ws.merge_cells(start_row=5, start_column=3, end_row=5, end_column=ncols)

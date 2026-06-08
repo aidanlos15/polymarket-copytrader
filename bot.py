@@ -365,15 +365,21 @@ def main() -> None:
     detector = OnchainDetector()
     print(f"On-chain detection via {config.POLYGON_HTTP.split('/v2/')[0]}/v2/***")
 
-    # Scale comes from the editable SCALE % cell in the Excel; fall back to config and
-    # keep the last good value if the cell is unreadable (e.g. the file is open in Excel).
-    scale_pct = config.SCALE_RATIO * 100
+    # Scale (1-100%) is set from the web dashboard, stored in scale_<NAME>.txt next to the
+    # Excel file. Default 100% (full size); trades are recorded at the target's full size
+    # (rn1_size) and re-scaled to this % every cycle, so changing it recomputes all history.
+    scale_pct = 100.0
+    scale_file = os.path.join(os.path.dirname(os.path.abspath(config.EXCEL_PATH)),
+                              f"scale_{config.TARGET_NAME}.txt")
 
     def current_scale() -> float:
         nonlocal scale_pct
-        v = sheets.read_scale_pct()
-        if v is not None:
-            scale_pct = v
+        try:
+            v = float(open(scale_file).read().strip())
+            if 1.0 <= v <= 100.0:
+                scale_pct = v
+        except (OSError, ValueError):
+            pass
         return scale_pct
 
     # First detect pass fetches `--backfill N` trades (seed history); after that, the
