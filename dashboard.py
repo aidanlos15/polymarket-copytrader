@@ -93,10 +93,13 @@ form.scale { display:inline-flex; gap:6px; align-items:center; margin:0; }
 input[type=number] { width:64px; padding:5px 6px; border:1px solid #d0d7de; border-radius:6px; font:inherit; }
 .hint { color:#8c959f; font-size:11px; }
 .cards { display:grid; grid-template-columns:repeat(7,1fr); gap:10px; margin-bottom:14px; }
-.daily { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:18px; }
-.day { background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:4px 9px; text-align:center; }
+.daily { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:14px; }
+.day { display:inline-block; background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:4px 9px; text-align:center; text-decoration:none; color:inherit; cursor:pointer; }
+.day:hover { border-color:#0969da; }
+.day.active { border-color:#0969da; background:#ddf4ff; }
 .day .d { color:#656d76; font-size:10px; }
 .day .v { font-size:12px; font-weight:700; }
+.banner { background:#ddf4ff; border:1px solid #0969da; border-radius:8px; padding:8px 12px; margin-bottom:12px; font-size:13px; }
 .card { background:#f6f8fa; border:1px solid #d0d7de; border-radius:10px; padding:12px 14px; }
 .card .label { color:#656d76; font-size:10px; letter-spacing:.04em; text-transform:uppercase; }
 .card .val { font-size:20px; font-weight:700; margin-top:4px; }
@@ -114,7 +117,7 @@ tr:hover td { background:#f6f8fa; }
 """
 
 
-def _render_tracker(s: dict, scale_val: int) -> str:
+def _render_tracker(s: dict, scale_val: int, date_filter: str = "") -> str:
     summ = s.get("summary", {})
     name = s.get("name", "?")
     live = '<span class="live">LIVE</span>' if s.get("live") else "paper (dry-run)"
@@ -138,12 +141,21 @@ def _render_tracker(s: dict, scale_val: int) -> str:
     daily = summ.get("daily", [])[:14]
     daily_html = ""
     if daily:
-        chips = "".join(
-            f'<div class="day"><div class="d">{d[5:]}</div>'
-            f'<div class="v {_cls(p)}">{_money(p)}</div></div>' for d, p in daily)
+        allcls = "" if date_filter else " active"
+        chips = f'<a class="day{allcls}" href="/?t={name}"><div class="d">ALL</div><div class="v">&mdash;</div></a>'
+        chips += "".join(
+            f'<a class="day{" active" if d == date_filter else ""}" href="/?t={name}&date={d}">'
+            f'<div class="d">{d[5:]}</div><div class="v {_cls(p)}">{_money(p)}</div></a>'
+            for d, p in daily)
         daily_html = f'<div class="daily"><span class="sub">Daily realized:</span> {chips}</div>'
 
     rows = s.get("positions", [])
+    if date_filter:
+        rows = [r for r in rows if r.get("trade_date") == date_filter]
+    banner = ""
+    if date_filter:
+        banner = (f'<div class="banner">Showing positions opened on <b>{date_filter}</b> '
+                  f'({len(rows)}) · <a href="/?t={name}">show all</a></div>')
     body = []
     for r in rows[:200]:
         st = r.get("status", "")
@@ -151,6 +163,7 @@ def _render_tracker(s: dict, scale_val: int) -> str:
             f'<tr><td class="l">{r.get("market_title","")}</td>'
             f'<td class="l">{r.get("outcome","")}</td>'
             f'<td><span class="tag {st}">{st}</span></td>'
+            f'<td class="l">{r.get("trade_time","")}</td>'
             f'<td>{r.get("net_paper_size","")}</td>'
             f'<td>{r.get("avg_entry_price","")}</td>'
             f'<td>{r.get("whale_entry","")}</td>'
@@ -179,8 +192,9 @@ def _render_tracker(s: dict, scale_val: int) -> str:
       {controls}
       <div class="cards">{card_html}</div>
       {daily_html}
+      {banner}
       <table>
-        <tr><th class="l">Market</th><th class="l">Outcome</th><th>Status</th><th>Size</th>
+        <tr><th class="l">Market</th><th class="l">Outcome</th><th>Status</th><th class="l">Opened</th><th>Size</th>
             <th>Our Entry</th><th>Whale Entry</th><th>Cur Price</th><th>Value</th><th>P&L</th>
             <th>Lag s</th></tr>
         {''.join(body)}
@@ -220,7 +234,8 @@ def index():
         scale_val = _read_scale(active)
         if scale_val is None:
             scale_val = int(s.get("summary", {}).get("scale_pct", 100) or 100)
-        inner = _render_tracker(s, scale_val)
+        date_filter = request.args.get("date", "")
+        inner = _render_tracker(s, scale_val, date_filter)
 
     return f"""<!doctype html><html><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">

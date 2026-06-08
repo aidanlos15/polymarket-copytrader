@@ -177,7 +177,7 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
     agg: dict[str, dict] = defaultdict(lambda: {
         "net_paper_size": 0.0, "total_bought": 0.0, "cost_basis": 0.0, "pnl": 0.0,
         "market_title": "", "outcome": "", "condition_id": "", "cur_price": None,
-        "whale_cost": 0.0, "lag_sum": 0.0, "lag_n": 0,
+        "whale_cost": 0.0, "lag_sum": 0.0, "lag_n": 0, "first_ts": 0,
     })
     priced = unpriced = hidden = 0
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -245,6 +245,13 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
             a["lag_n"] += 1
         except (TypeError, ValueError):
             pass
+        # Entry timestamp = earliest trade on this token.
+        try:
+            ts = int(float(t.get("trade_ts") or 0))
+            if ts and (a["first_ts"] == 0 or ts < a["first_ts"]):
+                a["first_ts"] = ts
+        except (TypeError, ValueError):
+            pass
         if side == "BUY":
             a["net_paper_size"] += size
             a["total_bought"] += size
@@ -269,6 +276,11 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
         avg_entry = (cost / a["total_bought"]) if a["total_bought"] > 1e-9 else 0.0
         whale_entry = (a["whale_cost"] / a["total_bought"]) if a["total_bought"] > 1e-9 else 0.0
         avg_lag = round(a["lag_sum"] / a["lag_n"]) if a["lag_n"] else ""
+        if a["first_ts"]:
+            _dt = datetime.fromtimestamp(a["first_ts"], tz=timezone.utc)
+            trade_time, trade_date = _dt.strftime("%Y-%m-%d %H:%M"), _dt.strftime("%Y-%m-%d")
+        else:
+            trade_time = trade_date = ""
         pnl_pct = (a["pnl"] / cost * 100) if cost > 1e-9 else 0.0
         resolved = resolved_by_condition.get(a["condition_id"], False)
         status = "RESOLVED" if resolved else "OPEN"
@@ -287,6 +299,8 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
             "market_title": a["market_title"],
             "outcome": a["outcome"],
             "status": status,
+            "trade_time": trade_time,
+            "trade_date": trade_date,
             "net_paper_size": round(net, 6),
             "total_bought": round(a["total_bought"], 6),
             "avg_entry_price": round(avg_entry, 6),

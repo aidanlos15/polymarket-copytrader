@@ -36,7 +36,7 @@ TRADES_HEADER = [
 # Aggregated per-token view. Rebuilt from scratch each cycle, so order is free to be
 # reader-friendly: the human-readable columns first, long ID hashes last.
 POSITIONS_HEADER = [
-    "market_title", "outcome", "status", "net_paper_size", "total_bought",
+    "market_title", "outcome", "status", "trade_time", "net_paper_size", "total_bought",
     "avg_entry_price", "whale_entry", "cost_basis", "current_price", "current_value",
     "pnl", "pnl_pct", "avg_lag_s", "price_source", "last_updated", "token_id",
     "condition_id",
