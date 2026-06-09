@@ -38,7 +38,7 @@ TRADES_HEADER = [
 # reader-friendly: the human-readable columns first, long ID hashes last.
 POSITIONS_HEADER = [
     "market_title", "outcome", "status", "trade_time", "net_paper_size", "total_bought",
-    "avg_entry_price", "whale_entry", "cost_basis", "current_price", "current_value",
+    "avg_entry_price", "whale_entry", "delta", "cost_basis", "current_price", "current_value",
     "pnl", "pnl_pct", "avg_lag_s", "price_source", "last_updated", "token_id",
     "condition_id",
 ]
@@ -69,7 +69,7 @@ _PCT = '0.00"%"'         # already-scaled percent
 _NUMFMT = {
     "cost_basis": _CCY, "current_value": _CCY, "pnl": _CCY, "paper_cost": _CCY,
     "avg_entry_price": _PRICE, "current_price": _PRICE, "paper_entry_price": _PRICE,
-    "rn1_price": _PRICE, "whale_entry": _PRICE, "avg_lag_s": '#,##0', "pnl_pct": _PCT,
+    "rn1_price": _PRICE, "whale_entry": _PRICE, "delta": _PRICE, "avg_lag_s": '#,##0', "pnl_pct": _PCT,
     "net_paper_size": _SIZE, "total_bought": _SIZE, "paper_size": _SIZE,
     "rn1_size": _SIZE, "scale_ratio": _SIZE, "detect_lag_s": '#,##0',
     "live_avg_price": _PRICE, "live_filled": _SIZE,
@@ -278,6 +278,7 @@ class ExcelClient:
             ("TODAY'S P&L", today, _CCY, signfill(today)),
             ("REALIZED · resolved", real, _CCY, signfill(real)),
             ("UNREALIZED · open", unreal, _CCY, signfill(unreal)),
+            ("AVG DELTA · our−whale", summary.get("avg_delta", 0), _PRICE, BLUE),
             ("TOTAL SPENT", summary.get("total_cost", 0), _CCY, BLUE),
             ("PORTFOLIO VALUE · open", summary.get("portfolio_value", 0), _CCY, BLUE),
             ("OPEN / RESOLVED", f"{oc} / {rc}", None, BLUE),

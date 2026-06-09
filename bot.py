@@ -327,6 +327,7 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
             "total_bought": round(a["total_bought"], 6),
             "avg_entry_price": round(avg_entry, 6),
             "whale_entry": round(whale_entry, 6),
+            "delta": round(avg_entry - whale_entry, 6),  # our entry minus whale's
             "avg_lag_s": avg_lag,
             "cost_basis": round(cost, 4),
             "current_price": round(cur, 6) if cur is not None else "",
@@ -343,8 +344,13 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
     # Daily realized P&L, most-recent-day first (8th, 7th, 6th, ...). Sums to total realized.
     daily_series = sorted(daily_realized.items(), key=lambda kv: kv[0], reverse=True)[:30]
     today_pnl = daily_realized.get(today_str, 0.0)
+    # Share-weighted average delta (our avg entry vs the whale's) across all bought volume.
+    _tot_bought = sum(a["total_bought"] for a in agg.values())
+    avg_delta = ((total_cost - sum(a["whale_cost"] for a in agg.values())) / _tot_bought
+                 if _tot_bought > 1e-9 else 0.0)
     summary = {
         "last_updated": now,
+        "avg_delta": round(avg_delta, 6),
         "total_cost": round(total_cost, 4),
         "total_pnl": round(total_pnl, 4),
         "today_pnl": round(today_pnl, 4),
@@ -536,6 +542,7 @@ def build_live_view(trades: list[dict], price_by_token: dict[str, float],
             "trade_time": trade_time, "trade_date": trade_date, "first_ts": a["first_ts"],
             "net_paper_size": round(net, 6), "total_bought": round(a["total_bought"], 6),
             "avg_entry_price": round(avg_entry, 6), "whale_entry": round(whale_entry, 6),
+            "delta": round(avg_entry - whale_entry, 6),
             "avg_lag_s": avg_lag, "cost_basis": round(cost, 4),
             "current_price": round(cur, 6) if cur is not None else "",
             "current_value": round(cur_value, 4), "pnl": round(a["pnl"], 4),
@@ -544,8 +551,12 @@ def build_live_view(trades: list[dict], price_by_token: dict[str, float],
         })
     rows.sort(key=lambda r: r.get("first_ts", 0), reverse=True)
     daily_series = sorted(daily_realized.items(), key=lambda kv: kv[0], reverse=True)[:30]
+    _tot_bought = sum(a["total_bought"] for a in agg.values())
+    avg_delta = ((total_cost - sum(a["whale_cost"] for a in agg.values())) / _tot_bought
+                 if _tot_bought > 1e-9 else 0.0)
     summary = {
         "last_updated": now,
+        "avg_delta": round(avg_delta, 6),
         "total_cost": round(total_cost, 4),
         "total_pnl": round(total_pnl, 4),
         "today_pnl": round(daily_realized.get(today_str, 0.0), 4),

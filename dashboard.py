@@ -91,6 +91,14 @@ def _money(x) -> str:
         return str(x)
 
 
+def _signed3(x) -> str:
+    """Signed price to 3dp, e.g. +0.032 / -0.011 — for the delta (a 0-1 price difference)."""
+    try:
+        return f"{float(x):+.3f}"
+    except (TypeError, ValueError):
+        return str(x)
+
+
 def _cls(x) -> str:
     try:
         return "pos" if float(x) > 0 else ("neg" if float(x) < 0 else "")
@@ -187,6 +195,7 @@ COLUMNS = [
     ("size", "Size", False),
     ("our_entry", "Our Entry", False),
     ("whale_entry", "Whale Entry", False),
+    ("delta", "Delta", False),
     ("cur_price", "Cur Price", False),
     ("value", "Value", False),
     ("pnl", "P&L", False),
@@ -204,6 +213,7 @@ def _row_cells(r: dict) -> dict[str, str]:
         "size": f'<td data-col="size">{r.get("net_paper_size","")}</td>',
         "our_entry": f'<td data-col="our_entry">{r.get("avg_entry_price","")}</td>',
         "whale_entry": f'<td data-col="whale_entry">{r.get("whale_entry","")}</td>',
+        "delta": f'<td data-col="delta">{_signed3(r.get("delta", 0)) if r.get("delta", "") != "" else ""}</td>',
         "cur_price": f'<td data-col="cur_price">{r.get("current_price","")}</td>',
         "value": f'<td data-col="value">{_money(r.get("current_value",0))}</td>',
         "pnl": f'<td data-col="pnl" class="{_cls(r.get("pnl",0))}">{_money(r.get("pnl",0))}</td>',
@@ -231,6 +241,7 @@ def _render_tracker(s: dict, scale_val: float, date_filter: str = "") -> str:
         ("Today's P&L", _money(summ.get("today_pnl", 0)), cardcls(summ.get("today_pnl", 0))),
         ("Realized · resolved", _money(summ.get("realized_pnl", 0)), cardcls(summ.get("realized_pnl", 0))),
         ("Unrealized · open", _money(summ.get("unrealized_pnl", 0)), cardcls(summ.get("unrealized_pnl", 0))),
+        ("Avg Delta · our−whale entry", _signed3(summ.get("avg_delta", 0)), ""),
         ("Total Spent", _money(summ.get("total_cost", 0)), ""),
         ("Portfolio Value · open", _money(summ.get("portfolio_value", 0)), ""),
         ("Peak Open · cash to fund", _money(summ.get("peak_open_value", 0)), "peak"),
