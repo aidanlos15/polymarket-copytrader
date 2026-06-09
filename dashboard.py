@@ -253,8 +253,10 @@ def _render_tracker(s: dict, scale_val: float, date_filter: str = "") -> str:
         f'<div class="card {c}"><div class="label">{l}</div><div class="val">{v}</div></div>'
         for l, v, c in cards)
 
+    date_q = f"&date={date_filter}" if date_filter else ""
+    export_btn = (f'<a class="btn export" style="margin-left:auto" href="/export?t={name}{date_q}" '
+                  f'title="Download positions + P&amp;L summary as Excel">&darr; Export</a>')
     daily = summ.get("daily", [])[:14]
-    daily_html = ""
     if daily:
         allcls = "" if date_filter else " active"
         chips = f'<a class="day{allcls}" href="/?t={name}"><div class="d">ALL</div><div class="v">&mdash;</div></a>'
@@ -262,7 +264,10 @@ def _render_tracker(s: dict, scale_val: float, date_filter: str = "") -> str:
             f'<a class="day{" active" if d == date_filter else ""}" href="/?t={name}&date={d}">'
             f'<div class="d">{d[5:]}</div><div class="v {_cls(p)}">{_money(p)}</div></a>'
             for d, p in daily)
-        daily_html = f'<div class="daily"><span class="sub">Daily realized:</span> {chips}</div>'
+        daily_html = (f'<div class="daily"><span class="sub">Daily realized:</span> '
+                      f'{chips}{export_btn}</div>')
+    else:
+        daily_html = f'<div class="daily">{export_btn}</div>'
 
     rows = (s.get("live_positions") or []) if live_mode else s.get("positions", [])
     if date_filter:
@@ -332,6 +337,138 @@ def _render_tracker(s: dict, scale_val: float, date_filter: str = "") -> str:
         <tr>{header_cells}</tr>
         {''.join(body)}
       </table></div>"""
+
+
+def _build_export(name: str, s: dict, rows: list[dict], live_mode: bool, date_filter: str) -> bytes:
+    """Render an .xlsx in memory: a P&L summary header + the aggregated positions table
+    (one row per market/outcome — already combined across trades). Returns the file bytes."""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    view = (s.get("live_summary") or {}) if live_mode else s.get("summary", {})
+
+    def f(x):
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return 0.0
+
+    # P&L summary computed FROM the (possibly date-filtered) rows, so it always matches
+    # exactly what's exported below.
+    open_rows = [r for r in rows if r.get("status") == "OPEN"]
+    res_rows = [r for r in rows if r.get("status") == "RESOLVED"]
+    tp = sum(f(r.get("pnl")) for r in rows)
+    realized = sum(f(r.get("pnl")) for r in res_rows)
+    unreal = sum(f(r.get("pnl")) for r in open_rows)
+    cost = sum(f(r.get("cost_basis")) for r in rows)
+    value = sum(f(r.get("current_value")) for r in open_rows)
+    tb = sum(f(r.get("total_bought")) for r in rows)
+    avg_delta = (sum(f(r.get("total_bought")) * f(r.get("delta")) for r in rows) / tb) if tb > 1e-9 else 0.0
+
+    CCY, PRICE, SIZE = "$#,##0.00", "0.000", "#,##0.0000"
+    NAVY, BLUE, GREEN, RED, LIGHT = "1F3864", "2F5496", "2E7D32", "C62828", "F2F6FC"
+    cols = [("Market", "l", 42), ("Outcome", "l", 22), ("Status", "c", 10), ("Opened", "l", 17),
+            ("Size", "c", 12), ("Our Entry", "c", 10), ("Whale Entry", "c", 12), ("Delta", "c", 9),
+            ("Cur Price", "c", 10), ("Value", "c", 12), ("P&L", "c", 12), ("Lag s", "c", 8)]
+    ncols = len(cols)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Positions"
+    period = date_filter or "All days"
+
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncols)
+    t = ws.cell(1, 1, f"Polymarket Copytrader  ·  @{name}  ·  {'LIVE' if live_mode else 'paper'}  ·  {period}")
+    t.font = Font(bold=True, size=14, color="FFFFFF")
+    t.alignment = Alignment(horizontal="left", vertical="center")
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=ncols)
+    sub = ws.cell(2, 1, f"Updated {view.get('last_updated','')}   ·   {len(rows)} positions "
+                        f"({len(open_rows)} open / {len(res_rows)} resolved)")
+    sub.font = Font(size=10, italic=True, color="D9E1F2")
+    for r in (1, 2):
+        for c in range(1, ncols + 1):
+            ws.cell(r, c).fill = PatternFill("solid", fgColor=NAVY)
+    ws.row_dimensions[1].height = 24
+
+    # Summary cards (label row 3, value row 4), distributed across the columns.
+    cards = [("TOTAL P&L", tp, CCY), ("REALIZED", realized, CCY), ("UNREALIZED", unreal, CCY),
+             ("AVG DELTA", avg_delta, PRICE), ("TOTAL SPENT", cost, CCY),
+             ("PORTFOLIO VALUE", value, CCY), ("OPEN / RESOLVED", f"{len(open_rows)} / {len(res_rows)}", None)]
+    base, rem = divmod(ncols, len(cards))
+    spans, start = [], 1
+    for i in range(len(cards)):
+        w = base + (1 if i < rem else 0)
+        spans.append((start, start + w - 1))
+        start += w
+    for (label, val, fmt), (c0, c1) in zip(cards, spans):
+        ws.merge_cells(start_row=3, start_column=c0, end_row=3, end_column=c1)
+        ws.merge_cells(start_row=4, start_column=c0, end_row=4, end_column=c1)
+        lc = ws.cell(3, c0, label)
+        lc.font = Font(bold=True, size=9, color="FFFFFF")
+        lc.alignment = Alignment(horizontal="center", vertical="center")
+        fill = GREEN if (fmt == CCY and isinstance(val, (int, float)) and val > 0) else \
+            (RED if (fmt == CCY and isinstance(val, (int, float)) and val < 0) else BLUE)
+        vc = ws.cell(4, c0, val)
+        vc.font = Font(bold=True, size=13, color="FFFFFF")
+        vc.alignment = Alignment(horizontal="center", vertical="center")
+        if fmt:
+            vc.number_format = fmt
+        for r in (3, 4):
+            for c in range(c0, c1 + 1):
+                ws.cell(r, c).fill = PatternFill("solid", fgColor=fill)
+    ws.row_dimensions[4].height = 24
+
+    hr = 6
+    for i, (label, _align, width) in enumerate(cols, start=1):
+        cell = ws.cell(hr, i, label)
+        cell.font = Font(bold=True, size=10, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor=BLUE)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws.column_dimensions[get_column_letter(i)].width = width
+    fmts = [None, None, None, None, SIZE, PRICE, PRICE, PRICE, PRICE, CCY, CCY, None]
+    for ri, r in enumerate(rows):
+        row = hr + 1 + ri
+        band = PatternFill("solid", fgColor=LIGHT) if ri % 2 else None
+        vals = [r.get("market_title", ""), r.get("outcome", ""), r.get("status", ""),
+                r.get("trade_time", ""), f(r.get("net_paper_size")), f(r.get("avg_entry_price")),
+                f(r.get("whale_entry")), f(r.get("delta")), f(r.get("current_price")),
+                f(r.get("current_value")), f(r.get("pnl")), r.get("avg_lag_s", "")]
+        for ci, (v, fmt) in enumerate(zip(vals, fmts), start=1):
+            cell = ws.cell(row, ci, v)
+            if fmt:
+                cell.number_format = fmt
+            if band:
+                cell.fill = band
+            cell.alignment = Alignment(horizontal="left" if cols[ci - 1][1] == "l" else "center")
+    ws.freeze_panes = f"A{hr + 1}"
+    ws.sheet_view.showGridLines = False
+
+    bio = BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+
+@app.route("/export")
+def export():
+    if not _auth_ok():
+        return _need_auth()
+    states = _load_states()
+    name = request.args.get("t", "")
+    if name not in states:
+        return Response("Unknown tracker", 404)
+    s = states[name]
+    live_mode = bool(s.get("live"))
+    rows = (s.get("live_positions") or []) if live_mode else s.get("positions", [])
+    date_filter = request.args.get("date", "")
+    if date_filter:
+        rows = [r for r in rows if r.get("trade_date") == date_filter]
+    data = _build_export(name, s, rows, live_mode, date_filter)
+    fname = f"{name}_positions_{date_filter or 'all'}.xlsx"
+    return Response(data, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
 @app.route("/live", methods=["POST"])
