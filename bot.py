@@ -36,6 +36,14 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
+def _f(x) -> float:
+    """Best-effort float; blanks/garbage -> 0.0 (Excel cells are often '')."""
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def trade_id(t: dict) -> str:
     """Source-independent dedupe key. Keyed on transaction hash + outcome token so the
     SAME trade detected on-chain and later echoed by the data API maps to one key
@@ -344,8 +352,11 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
         "hidden_count": hidden,
         "scale_pct": round(scale_pct),
     }
+    # Live-only view (real placed orders), computed from the same trades + prices.
+    live_rows, live_summary = build_live_view(trades, price_by_token, resolved_by_condition)
+
     sheets.write_positions(rows, summary, scale_pct=scale_pct)
-    write_state_json(summary, rows)
+    write_state_json(summary, rows, live_summary, live_rows)
     print(f"  scale {scale_pct:g}% | counted {priced} (hidden <$1: {hidden}, unpriced {unpriced}) "
           f"| open {open_count} (value ${portfolio_value:,.2f}) | "
           f"resolved {resolved_count} (real ${realized_pnl:,.2f}) | total P&L ${total_pnl:,.2f}")
@@ -373,6 +384,179 @@ def update_peak_open(open_value: float, scale_pct: float) -> float:
     return peak
 
 
+def _is_live_placed(t: dict) -> bool:
+    """True if this trade resulted in a REAL order being placed on the exchange (not a
+    dry-run/skip/error). The executor stamps a successful order with live_status='LIVE:...'
+    and a live_order_id; dry-runs are 'DRY_RUN' and failures have no order id."""
+    status = str(t.get("live_status", "") or "")
+    oid = str(t.get("live_order_id", "") or "")
+    return status.startswith("LIVE") and bool(oid.strip())
+
+
+def update_peak_live(open_value: float) -> float:
+    """High-water mark of the LIVE open-position value. Unlike the paper peak this never
+    resets on scale changes (live orders are fixed at execution, scale is irrelevant)."""
+    base = os.path.dirname(os.path.abspath(config.EXCEL_PATH))
+    path = os.path.join(base, f"peak_live_{config.TARGET_NAME}.json")
+    peak = open_value
+    try:
+        d = json.load(open(path))
+        peak = max(float(d.get("peak", 0)), open_value)
+    except (OSError, ValueError, TypeError):
+        pass
+    try:
+        with open(path + ".tmp", "w") as fh:
+            json.dump({"peak": peak}, fh)
+        os.replace(path + ".tmp", path)
+    except OSError:
+        pass
+    return peak
+
+
+def build_live_view(trades: list[dict], price_by_token: dict[str, float],
+                    resolved_by_condition: dict[str, bool]) -> tuple[list[dict], dict]:
+    """Build the LIVE-only positions view: aggregate ONLY trades that actually placed a
+    real order, sized by the real fill (live_filled / live_avg_price) where available,
+    else by the order we sent. Independent of the paper view and the scale slider — live
+    orders are real and fixed, so they're shown exactly as executed. Returns (rows, summary)
+    in the same shape the dashboard uses for the paper view, so rendering is identical."""
+    now = _now_iso()
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    agg: dict[str, dict] = defaultdict(lambda: {
+        "net_paper_size": 0.0, "total_bought": 0.0, "cost_basis": 0.0, "pnl": 0.0,
+        "market_title": "", "outcome": "", "condition_id": "", "cur_price": None,
+        "whale_cost": 0.0, "lag_sum": 0.0, "lag_n": 0, "first_ts": 0,
+    })
+    daily_realized: dict[str, float] = defaultdict(float)
+    placed = 0
+
+    for t in trades:
+        if not _is_live_placed(t):
+            continue
+        token = str(t.get("token_id", ""))
+        cid = str(t.get("condition_id", ""))
+        side = str(t.get("side", "BUY")).upper()
+        cur = price_by_token.get(token)
+        if cur is None:                      # market price unavailable this cycle — skip
+            continue
+
+        # Real fill first; fall back to the order we sent (capped at the per-order max).
+        entry = _f(t.get("live_avg_price")) or _f(t.get("paper_entry_price"))
+        filled = _f(t.get("live_filled"))
+        intended_shares = _f(t.get("rn1_size")) * _f(t.get("scale_ratio"))
+        if side == "BUY":
+            if filled > 0:
+                size = filled
+            else:
+                usd = min(intended_shares * _f(t.get("paper_entry_price")),
+                          config.LIVE_MAX_ORDER_USD)
+                size = (usd / entry) if entry > 1e-9 else 0.0
+        else:
+            size = filled if filled > 0 else intended_shares
+        if size <= 0 or entry <= 0:
+            continue
+        placed += 1
+
+        pnl = size * (cur - entry) if side == "BUY" else size * (entry - cur)
+        if resolved_by_condition.get(cid, False):
+            try:
+                d = datetime.fromtimestamp(
+                    int(float(t.get("trade_ts") or 0)), tz=timezone.utc).strftime("%Y-%m-%d")
+                daily_realized[d] += pnl
+            except (ValueError, OSError, OverflowError):
+                pass
+
+        a = agg[token]
+        a["market_title"] = t.get("market_title", a["market_title"])
+        a["outcome"] = t.get("outcome", a["outcome"])
+        a["condition_id"] = cid
+        a["cur_price"] = cur
+        a["pnl"] += pnl
+        if str(t.get("source", "")).lower() == "onchain":
+            try:
+                a["lag_sum"] += float(t.get("detect_lag_s"))
+                a["lag_n"] += 1
+            except (TypeError, ValueError):
+                pass
+        try:
+            ts = int(float(t.get("trade_ts") or 0))
+            if ts and (a["first_ts"] == 0 or ts < a["first_ts"]):
+                a["first_ts"] = ts
+        except (TypeError, ValueError):
+            pass
+        if side == "BUY":
+            a["net_paper_size"] += size
+            a["total_bought"] += size
+            a["cost_basis"] += size * entry
+            a["whale_cost"] += size * _f(t.get("rn1_price"))
+        else:
+            a["net_paper_size"] -= size
+
+    rows: list[dict] = []
+    total_pnl = total_cost = realized_pnl = unrealized_pnl = portfolio_value = 0.0
+    open_count = resolved_count = 0
+    for token, a in agg.items():
+        cur = a["cur_price"]
+        net = a["net_paper_size"]
+        cost = a["cost_basis"]
+        cur_value = net * cur if cur is not None else 0.0
+        avg_entry = (cost / a["total_bought"]) if a["total_bought"] > 1e-9 else 0.0
+        whale_entry = (a["whale_cost"] / a["total_bought"]) if a["total_bought"] > 1e-9 else 0.0
+        avg_lag = round(a["lag_sum"] / a["lag_n"]) if a["lag_n"] else ""
+        if a["first_ts"]:
+            _dt = datetime.fromtimestamp(a["first_ts"], tz=timezone.utc)
+            trade_time, trade_date = _dt.strftime("%Y-%m-%d %H:%M"), _dt.strftime("%Y-%m-%d")
+        else:
+            trade_time = trade_date = ""
+        pnl_pct = (a["pnl"] / cost * 100) if cost > 1e-9 else 0.0
+        resolved = resolved_by_condition.get(a["condition_id"], False)
+        status = "RESOLVED" if resolved else "OPEN"
+
+        total_pnl += a["pnl"]
+        total_cost += cost
+        if resolved:
+            realized_pnl += a["pnl"]
+            resolved_count += 1
+        else:
+            unrealized_pnl += a["pnl"]
+            portfolio_value += cur_value
+            open_count += 1
+
+        rows.append({
+            "market_title": a["market_title"], "outcome": a["outcome"], "status": status,
+            "trade_time": trade_time, "trade_date": trade_date, "first_ts": a["first_ts"],
+            "net_paper_size": round(net, 6), "total_bought": round(a["total_bought"], 6),
+            "avg_entry_price": round(avg_entry, 6), "whale_entry": round(whale_entry, 6),
+            "avg_lag_s": avg_lag, "cost_basis": round(cost, 4),
+            "current_price": round(cur, 6) if cur is not None else "",
+            "current_value": round(cur_value, 4), "pnl": round(a["pnl"], 4),
+            "pnl_pct": round(pnl_pct, 2), "price_source": "RESOLVED" if resolved else "OPEN",
+            "last_updated": now, "token_id": token, "condition_id": a["condition_id"],
+        })
+    rows.sort(key=lambda r: r.get("first_ts", 0), reverse=True)
+    daily_series = sorted(daily_realized.items(), key=lambda kv: kv[0], reverse=True)[:30]
+    summary = {
+        "last_updated": now,
+        "total_cost": round(total_cost, 4),
+        "total_pnl": round(total_pnl, 4),
+        "today_pnl": round(daily_realized.get(today_str, 0.0), 4),
+        "daily": [[d, round(p, 4)] for d, p in daily_series],
+        "total_pnl_pct": round((total_pnl / total_cost * 100) if total_cost > 1e-9 else 0.0, 2),
+        "realized_pnl": round(realized_pnl, 4),
+        "unrealized_pnl": round(unrealized_pnl, 4),
+        "portfolio_value": round(portfolio_value, 4),
+        "peak_open_value": round(update_peak_live(portfolio_value), 4),
+        "open_count": open_count,
+        "resolved_count": resolved_count,
+        "priced_count": placed,
+        "unpriced_count": 0,
+        "hidden_count": 0,
+        "scale_pct": "",          # scale is a paper-only what-if; N/A for live
+        "order_count": placed,
+    }
+    return rows, summary
+
+
 def read_live() -> bool:
     """Runtime live-trading flag for this tracker, set by the dashboard toggle and stored
     in live_<NAME>.txt. Defaults to config.ENABLE_LIVE_TRADING (off) if unset."""
@@ -384,16 +568,21 @@ def read_live() -> bool:
         return bool(config.ENABLE_LIVE_TRADING)
 
 
-def write_state_json(summary: dict, rows: list[dict]) -> None:
-    """Write a small JSON snapshot (summary + positions) next to the Excel file, for the
-    web dashboard to read. Atomic via temp-file rename so the dashboard never sees a
-    half-written file."""
+def write_state_json(summary: dict, rows: list[dict],
+                     live_summary: dict | None = None,
+                     live_rows: list[dict] | None = None) -> None:
+    """Write a small JSON snapshot next to the Excel file, for the web dashboard to read.
+    Carries BOTH the paper view (summary/positions) and the live view (live_summary/
+    live_positions) every cycle, so the dashboard can switch instantly and paper data is
+    never lost when live mode is on. Atomic via temp-file rename."""
     state = {
         "name": config.TARGET_NAME,
         "address": config.TARGET_ADDRESS,
         "live": read_live(),
         "summary": summary,
         "positions": rows,
+        "live_summary": live_summary or {},
+        "live_positions": live_rows or [],
     }
     base = os.path.dirname(os.path.abspath(config.EXCEL_PATH))
     path = os.path.join(base, f"state_{config.TARGET_NAME}.json")

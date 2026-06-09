@@ -157,9 +157,16 @@ tr:hover td { background:#f6f8fa; }
 
 
 def _render_tracker(s: dict, scale_val: int, date_filter: str = "") -> str:
-    summ = s.get("summary", {})
     name = s.get("name", "?")
-    live = '<span class="live">LIVE</span>' if s.get("live") else "paper (dry-run)"
+    live_mode = bool(s.get("live"))
+    # In live mode show ONLY real placed orders; paper data stays computed in the
+    # background (s["summary"]/["positions"]) so switching back is instant.
+    if live_mode:
+        summ = s.get("live_summary") or {}
+        live = '<span class="live">LIVE</span>'
+    else:
+        summ = s.get("summary", {})
+        live = "paper (dry-run)"
 
     def cardcls(x):
         return "green" if _cls(x) == "pos" else ("red" if _cls(x) == "neg" else "")
@@ -189,10 +196,15 @@ def _render_tracker(s: dict, scale_val: int, date_filter: str = "") -> str:
             for d, p in daily)
         daily_html = f'<div class="daily"><span class="sub">Daily realized:</span> {chips}</div>'
 
-    rows = s.get("positions", [])
+    rows = (s.get("live_positions") or []) if live_mode else s.get("positions", [])
     if date_filter:
         rows = [r for r in rows if r.get("trade_date") == date_filter]
     banner = ""
+    if live_mode and not (s.get("live_positions") or []):
+        banner = ('<div class="banner">No live orders placed yet — this view shows only '
+                  'trades that were <b>actually executed</b> on the exchange. New copied '
+                  'trades will appear here once they fill. (Paper trading keeps running in '
+                  'the background — switch to Paper to see it.)</div>')
     if date_filter:
         banner = (f'<div class="banner">Showing positions opened on <b>{date_filter}</b> '
                   f'({len(rows)}) · <a href="/?t={name}">show all</a></div>')
@@ -213,7 +225,19 @@ def _render_tracker(s: dict, scale_val: int, date_filter: str = "") -> str:
             f'<td>{r.get("avg_lag_s","")}</td></tr>')
     note = f" (showing first 200 of {len(rows)})" if len(rows) > 200 else ""
 
-    controls = f"""
+    if live_mode:
+        controls = """
+    <div class="controls">
+      <button class="btn" onclick="location.reload()">&#8635; Refresh</button>
+      <span class="hint">Live view: only orders actually placed on the exchange. The scale
+        slider is a paper-only setting and doesn't affect live orders (those are fixed at
+        execution). Switch to Paper to adjust scale or see simulated trades.</span>
+    </div>"""
+        meta = (f"Updated {summ.get('last_updated','')} · <b>LIVE orders only</b> · "
+                f"Return {summ.get('total_pnl_pct',0):.2f}% · "
+                f"{summ.get('order_count',0)} order(s){note}")
+    else:
+        controls = f"""
     <div class="controls">
       <form class="scale" method="post" action="/scale">
         <input type="hidden" name="tracker" value="{name}">
@@ -223,12 +247,13 @@ def _render_tracker(s: dict, scale_val: int, date_filter: str = "") -> str:
       <button class="btn" onclick="location.reload()">&#8635; Refresh</button>
       <span class="hint">Scale recomputes ALL trades (only those &ge; $1 at that scale); applies within ~1 min.</span>
     </div>"""
+        meta = (f"Updated {summ.get('last_updated','')} · Scale {summ.get('scale_pct',100):g}%"
+                f" · Return {summ.get('total_pnl_pct',0):.2f}% · {summ.get('priced_count',0)} counted,"
+                f" {summ.get('hidden_count',0)} hidden &lt;$1{note}")
 
     return f"""
       <h1>@{name} <span class="sub">· {live}</span></h1>
-      <div class="sub">Updated {summ.get('last_updated','')} · Scale {summ.get('scale_pct',100):g}%
-        · Return {summ.get('total_pnl_pct',0):.2f}% · {summ.get('priced_count',0)} counted,
-        {summ.get('hidden_count',0)} hidden &lt;$1{note}</div>
+      <div class="sub">{meta}</div>
       {controls}
       <div class="cards">{card_html}</div>
       {daily_html}
