@@ -66,6 +66,10 @@ POLYGON_HTTP: str = _get("POLYGON_HTTP", "https://polygon-bor-rpc.publicnode.com
 # so polling faster than that just adds cheap eth_blockNumber checks but notices new blocks
 # sooner — directly lowering copy lag. 0.75s keeps most copies under ~1s; can go to 0.5.
 ONCHAIN_POLL_SECONDS: float = float(_get("ONCHAIN_POLL_SECONDS", "0.75"))
+# On startup, re-scan this many recent blocks (~2.1s each on Polygon, so 120 ≈ 250s) so a
+# brief restart/downtime never drops trades — any that are still within the copy window get
+# copied, already-logged ones are de-duped. Covers the restart gap end-to-end.
+ONCHAIN_STARTUP_LOOKBACK_BLOCKS: int = int(_get("ONCHAIN_STARTUP_LOOKBACK_BLOCKS", "120"))
 
 # --- Live trading (REAL MONEY) ----------------------------------------------
 # OFF by default: the bot records what it WOULD trade ("DRY_RUN") without sending.

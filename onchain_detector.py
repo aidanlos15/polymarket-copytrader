@@ -113,11 +113,21 @@ class OnchainDetector:
         self._block_time: dict[str, int] = {}
         self._last: int | None = None   # last polled block
 
-    def _rpc(self, method: str, params: list):
-        r = requests.post(config.POLYGON_HTTP,
-                          json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
-                          timeout=15).json()
-        return None if "error" in r else r.get("result")
+    def _rpc(self, method: str, params: list, tries: int = 3):
+        """JSON-RPC call with a few retries, so a transient RPC blip never silently drops a
+        block range (which would mean a missed trade). Returns None only after all retries."""
+        for attempt in range(tries):
+            try:
+                r = requests.post(
+                    config.POLYGON_HTTP,
+                    json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+                    timeout=15).json()
+                if "error" not in r:
+                    return r.get("result")
+            except (requests.RequestException, ValueError):
+                pass
+            time.sleep(0.4 * (attempt + 1))
+        return None
 
     def _block_ts(self, block_hex: str) -> int | None:
         if block_hex not in self._block_time:
@@ -127,14 +137,17 @@ class OnchainDetector:
             self._block_time[block_hex] = int(blk["timestamp"], 16)
         return self._block_time[block_hex]
 
-    def _get_logs(self, frm: int, to: int) -> list[dict]:
+    def _get_logs(self, frm: int, to: int) -> list[dict] | None:
+        """Returns the matching logs, or None if an RPC call FAILED — so the caller knows
+        not to advance the cursor past blocks we never actually scanned."""
         logs = []
         for pos in ([ORDERFILLED, None, [self.padded]],          # whale = maker (topic 2)
                     [ORDERFILLED, None, None, [self.padded]]):    # whale = taker (topic 3)
             r = self._rpc("eth_getLogs", [{"fromBlock": hex(frm), "toBlock": hex(to),
                                            "address": EXCHANGES, "topics": pos}])
-            if isinstance(r, list):
-                logs += r
+            if r is None:
+                return None                                      # failed -> don't skip blocks
+            logs += r
         return logs
 
     def poll_once(self) -> list[dict]:
@@ -143,20 +156,21 @@ class OnchainDetector:
         Each trade is a dict with the same field names the data-API path uses (asset,
         side, size, price, conditionId, title, outcome, outcomeIndex, timestamp,
         transactionHash). Safe to call in a loop; never raises (returns [] on RPC error).
-        On the first call it just records the chain head and returns [] (start forward)."""
+        On the FIRST call it starts a lookback window behind the chain head, so trades that
+        happened during a brief restart/downtime aren't missed (they're re-scanned and, if
+        still within the copy window, copied; already-logged ones are de-duped)."""
         try:
             latest = int(self._rpc("eth_blockNumber", []), 16)
-        except Exception:
+        except (TypeError, ValueError):
             return []
         if self._last is None:
-            self._last = latest
-            return []
+            # Re-scan recent blocks on startup so a restart gap doesn't drop fresh trades.
+            self._last = max(0, latest - config.ONCHAIN_STARTUP_LOOKBACK_BLOCKS)
         if latest <= self._last:
             return []
-        try:
-            logs = self._get_logs(self._last + 1, latest)
-        except Exception:
-            return []
+        logs = self._get_logs(self._last + 1, latest)
+        if logs is None:
+            return []                      # transient RPC failure -> retry same range, no skip
         self._last = latest
         recv = time.time()   # the instant we learned of these trades (for the lag metric)
 
