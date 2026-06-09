@@ -248,7 +248,9 @@ class ExcelClient:
                 self._trades.cell(row=row, column=col, value=mk.get(name, ""))
             # Hide the row when our scaled order is below the $1 minimum.
             self._trades.row_dimensions[row].hidden = bool(mk.get("_hidden"))
-        self._style_trades()
+        # NOTE: deliberately NOT calling _style_trades() here — re-styling every cell of a
+        # large history is very slow and purely cosmetic. Header/styling is applied once at
+        # creation; this just refreshes the mark values. _save() is deferred (flush()).
         self._save()
 
     # --- Positions / dashboard ---------------------------------------------

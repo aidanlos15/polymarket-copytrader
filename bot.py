@@ -739,6 +739,11 @@ def main() -> None:
         mark_to_market(sheets, sp)
         return
 
+    # Defer the first heavy full-history Trades re-mark by a full interval, so the opening
+    # cycles are fast and the dashboard goes live immediately (the re-mark is cosmetic Excel).
+    global _last_trade_marks_at
+    _last_trade_marks_at = time.monotonic()
+
     # Detection runs on its own thread (fast, never blocked). Pricing + the data-API
     # backup + Excel/dashboard writes run here on the main thread on their own cadences.
     stop = threading.Event()
@@ -753,6 +758,12 @@ def main() -> None:
             try:
                 sp = read_scale()
 
+                # REPRICE FIRST: refresh the dashboard from the existing sheet right away
+                # (so it goes live fast on startup) before the slower data-API catch-up.
+                if first or (time.monotonic() - last_reprice) >= config.REPRICE_INTERVAL_SECONDS:
+                    mark_to_market(sheets, sp)
+                    last_reprice = time.monotonic()
+
                 # BACKUP/SEED: the data API. Seeds history on the first pass, then reconciles
                 # occasionally (catches anything on-chain missed); same dedupe -> no doubles.
                 # Backup trades are stale (lag > MAX_COPY_LAG) so they never place live orders.
@@ -760,10 +771,6 @@ def main() -> None:
                     dataapi_pass(sheets, first_limit if first else config.TRADES_PER_POLL,
                                  executor, sp / 100.0, processed, live=read_live())
                     last_dataapi = time.monotonic()
-
-                if first or (time.monotonic() - last_reprice) >= config.REPRICE_INTERVAL_SECONDS:
-                    mark_to_market(sheets, sp)
-                    last_reprice = time.monotonic()
                 first = False
             except Exception as exc:  # keep the loop alive across transient failures
                 print(f"  cycle error: {exc!r}")
