@@ -117,6 +117,7 @@ class OnchainDetector:
     def _rpc(self, method: str, params: list, tries: int = 3):
         """JSON-RPC call with a few retries, so a transient RPC blip never silently drops a
         block range (which would mean a missed trade). Returns None only after all retries."""
+        last = ""
         for attempt in range(tries):
             try:
                 r = requests.post(
@@ -125,9 +126,12 @@ class OnchainDetector:
                     timeout=15).json()
                 if "error" not in r:
                     return r.get("result")
-            except (requests.RequestException, ValueError):
-                pass
+                last = str(r.get("error"))[:140]
+            except (requests.RequestException, ValueError) as exc:
+                last = f"{type(exc).__name__}: {exc}"[:140]
             time.sleep(0.4 * (attempt + 1))
+        if method == "eth_getLogs":   # surface WHY a scan failed (e.g. range/result limit)
+            print(f"  [onchain] {method} failed after {tries} tries: {last}")
         return None
 
     def _block_ts(self, block_hex: str) -> int | None:
