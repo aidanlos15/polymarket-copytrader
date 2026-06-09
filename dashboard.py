@@ -19,17 +19,24 @@ import os
 from flask import Flask, Response, redirect, request
 
 DATA_DIR = os.environ.get("DASHBOARD_DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
-USER = os.environ.get("DASHBOARD_USER", "")
-PW = os.environ.get("DASHBOARD_PASS", "")
+
+# Site password — PASSWORD ONLY (the username is ignored, leave it blank). Hardcoded
+# default so it survives redeploys / systemd-service resets; can still be overridden with
+# the DASHBOARD_PASS env var. The old "CHANGE_ME_NOW" placeholder counts as unset.
+_envpw = os.environ.get("DASHBOARD_PASS", "").strip()
+SITE_PASSWORD = _envpw if _envpw and _envpw != "CHANGE_ME_NOW" else "123"
+REALM = "Polymarket Copytrader - password only (leave username blank)"
 
 app = Flask(__name__)
 
 
 def _auth_ok() -> bool:
-    if not USER:
-        return True
     a = request.authorization
-    return bool(a and a.username == USER and a.password == PW)
+    return bool(a and a.password == SITE_PASSWORD)  # username ignored
+
+
+def _need_auth() -> Response:
+    return Response("Password required", 401, {"WWW-Authenticate": f'Basic realm="{REALM}"'})
 
 
 def _load_states() -> dict[str, dict]:
@@ -317,7 +324,7 @@ def _render_tracker(s: dict, scale_val: float, date_filter: str = "") -> str:
 @app.route("/live", methods=["POST"])
 def set_live():
     if not _auth_ok():
-        return Response("Auth required", 401, {"WWW-Authenticate": 'Basic realm="dashboard"'})
+        return _need_auth()
     name = request.form.get("tracker", "").strip()
     if name:
         _write_live(name, request.form.get("on", "0") == "1")
@@ -327,7 +334,7 @@ def set_live():
 @app.route("/scale", methods=["POST"])
 def set_scale():
     if not _auth_ok():
-        return Response("Auth required", 401, {"WWW-Authenticate": 'Basic realm="dashboard"'})
+        return _need_auth()
     name = request.form.get("tracker", "").strip()
     try:
         v = max(0.01, min(100.0, float(request.form.get("scale", "100"))))
@@ -341,7 +348,7 @@ def set_scale():
 @app.route("/")
 def index():
     if not _auth_ok():
-        return Response("Auth required", 401, {"WWW-Authenticate": 'Basic realm="dashboard"'})
+        return _need_auth()
     states = _load_states()
     if not states:
         inner, toggle, livebtn, livewarn = "<p>No data yet — waiting for the bot's first cycle.</p>", "", "", ""
