@@ -460,6 +460,25 @@ def _build_export(name: str, s: dict, rows: list[dict], live_mode: bool, date_fi
     return bio.getvalue()
 
 
+def _excel_path_for(s: dict, name: str) -> str:
+    """Locate a tracker's Excel trade-log in DATA_DIR. Prefer the filename the bot records
+    in state (excel_file); fall back to common names / any matching .xlsx, so export works
+    even before the bot has written a state with that field."""
+    candidates = []
+    if s.get("excel_file"):
+        candidates.append(s["excel_file"])
+    candidates += [f"{name}_paper_trades.xlsx", f"{name.lower()}_paper_trades.xlsx"]
+    for fn in candidates:
+        p = os.path.join(DATA_DIR, fn)
+        if fn.lower().endswith(".xlsx") and os.path.exists(p):
+            return p
+    # Last resort: any .xlsx in the data dir whose name mentions this tracker.
+    for p in glob.glob(os.path.join(DATA_DIR, "*.xlsx")):
+        if name.lower() in os.path.basename(p).lower():
+            return p
+    return ""
+
+
 def _build_trades_export(name: str, path: str, date_filter: str, live_mode: bool) -> bytes:
     """Render an .xlsx of EVERY individual trade (one row per fill) from the bot's Trades
     sheet, read-only. Filtered to a day if given; in live mode, only real placed orders."""
@@ -609,7 +628,10 @@ def export():
     kind = request.args.get("kind", "positions")
 
     if kind == "trades":
-        path = os.path.join(DATA_DIR, s.get("excel_file") or "")
+        path = _excel_path_for(s, name)
+        if not path:
+            return Response("Trade log file not found for this tracker yet — try again in "
+                            "a minute (the bot writes it each cycle).", 404)
         try:
             data = _build_trades_export(name, path, date_filter, live_mode)
         except Exception as exc:
