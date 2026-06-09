@@ -67,17 +67,19 @@ class Executor:
             return fh.read().strip()
 
     def _connect(self) -> None:
-        from py_clob_client.client import ClobClient
+        # CLOB V2 (Polymarket migrated Apr 2026; the old py-clob-client hardcodes the
+        # EIP-712 order version "1" and is rejected with "invalid order version").
+        from py_clob_client_v2 import ClobClient
 
         client = ClobClient(
             config.CLOB_API,
-            chain_id=137,  # Polygon
+            137,  # Polygon chain_id
             key=self._load_key(),
             signature_type=config.SIGNATURE_TYPE,
             funder=config.FUNDER_ADDRESS or None,
         )
         # L2 API credentials are derived by signing with the key (one network call).
-        client.set_api_creds(client.create_or_derive_api_creds())
+        client.set_api_creds(client.create_or_derive_api_key())
         self.client = client
 
     # --- order execution ----------------------------------------------------
@@ -111,16 +113,17 @@ class Executor:
             return _blank("LIVE_NO_KEY")
 
         try:
-            from py_clob_client.clob_types import MarketOrderArgs, OrderType
-            from py_clob_client.order_builder.constants import BUY, SELL
+            from py_clob_client_v2 import MarketOrderArgs, OrderType
 
             args = MarketOrderArgs(
                 token_id=str(token_id),
                 amount=float(amount_usd if side == "BUY" else shares),
-                side=BUY if side == "BUY" else SELL,
+                side=side,  # V2 builder accepts the "BUY"/"SELL" string directly
+                order_type=OrderType.FAK,
             )
-            signed = self.client.create_market_order(args)
-            resp = self.client.post_order(signed, OrderType.FAK)  # fill-and-kill = market take
+            # create_and_post_market_order builds + posts and auto-retries on a CLOB
+            # version bump (fill-and-kill = take whatever's on the book, cancel the rest).
+            resp = self.client.create_and_post_market_order(args, order_type=OrderType.FAK)
 
             if not isinstance(resp, dict):
                 return _blank("ERROR_BADRESP")
