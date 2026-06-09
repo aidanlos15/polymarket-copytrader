@@ -154,31 +154,60 @@ def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[s
 # price is fixed (1.0/0.0), so we cache it and stop calling the API for it — resolution
 # detection is effectively free and re-pricing gets cheaper as more markets settle.
 _RESOLVED_CACHE: dict[str, dict[str, float]] = {}
+# Last-known prices for OPEN markets (token -> price), so a market we don't refresh this
+# cycle still has a (slightly stale) price. And when each condition was last refreshed, so
+# we can round-robin stalest-first across cycles.
+_OPEN_PRICE_CACHE: dict[str, dict[str, float]] = {}     # conditionId -> {token: price}
+_LAST_PRICED_AT: dict[str, float] = {}                  # conditionId -> time.monotonic()
 
 
 def fetch_current_prices(trade_rows: list[dict]) -> tuple[dict[str, float], dict[str, bool]]:
-    """Fetch the current price for every token we hold, one call per market.
+    """Current price per held token — BUDGETED so a big portfolio can't freeze the loop.
 
-    Returns (price_by_token, resolved_by_condition). Markets already in the resolved
-    cache are served from it with no API call. Many trades share a market, so we query
-    GET /markets/<conditionId> once per unique conditionId.
+    Resolved markets are served from cache for free. For open markets we refresh
+    stalest-first (one CLOB call each) only until config.REPRICE_BUDGET_SECONDS is spent;
+    any not refreshed this cycle keep their last-known price. So every cycle finishes
+    promptly (and the dashboard updates), while all markets get refreshed over a few cycles.
     """
     price_by_token: dict[str, float] = {}
     resolved_by_condition: dict[str, bool] = {}
     conditions = {str(r.get("condition_id", "")) for r in trade_rows if r.get("condition_id")}
+
+    open_conditions: list[str] = []
     for cid in conditions:
         if cid in _RESOLVED_CACHE:                       # settled — no API call needed
             price_by_token.update(_RESOLVED_CACHE[cid])
             resolved_by_condition[cid] = True
             continue
+        resolved_by_condition[cid] = False
+        if cid in _OPEN_PRICE_CACHE:                     # seed with last-known price
+            price_by_token.update(_OPEN_PRICE_CACHE[cid])
+        open_conditions.append(cid)
+
+    # Refresh stalest-first, but stop once the time budget is spent.
+    open_conditions.sort(key=lambda c: _LAST_PRICED_AT.get(c, 0.0))
+    start = time.monotonic()
+    refreshed = 0
+    for cid in open_conditions:
+        if refreshed and (time.monotonic() - start) >= config.REPRICE_BUDGET_SECONDS:
+            break
         m = pm.get_market(cid)
+        _LAST_PRICED_AT[cid] = time.monotonic()
+        refreshed += 1
         if m and m["prices"]:
             price_by_token.update(m["prices"])
             resolved_by_condition[cid] = m["closed"]
             if m["closed"]:
                 _RESOLVED_CACHE[cid] = m["prices"]       # cache final prices forever
-        else:
-            resolved_by_condition[cid] = False
+                _OPEN_PRICE_CACHE.pop(cid, None)
+            else:
+                _OPEN_PRICE_CACHE[cid] = m["prices"]
+        # On a failed fetch we keep the seeded last-known price (already in price_by_token).
+
+    stale = len(open_conditions) - refreshed
+    if stale > 0:
+        print(f"  [reprice] refreshed {refreshed}/{len(open_conditions)} open markets this "
+              f"cycle (budget {config.REPRICE_BUDGET_SECONDS:g}s); {stale} used last-known price")
     return price_by_token, resolved_by_condition
 
 

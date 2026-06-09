@@ -37,6 +37,11 @@ POLL_INTERVAL_SECONDS: int = int(_get("POLL_INTERVAL_SECONDS", "30"))  # legacy 
 # (expensive — one CLOB call per market). Detection drives entry timing.
 DETECT_INTERVAL_SECONDS: int = int(_get("DETECT_INTERVAL_SECONDS", "7"))
 REPRICE_INTERVAL_SECONDS: int = int(_get("REPRICE_INTERVAL_SECONDS", "45"))
+# Hard wall-clock cap on the per-cycle price refresh. With a big portfolio, fetching every
+# market's price (one CLOB call each) can take minutes and freeze the dashboard, which only
+# updates when a reprice finishes. We refresh stalest-first within this budget and reuse the
+# last-known price for the rest, so every cycle finishes and the dashboard always updates.
+REPRICE_BUDGET_SECONDS: float = float(_get("REPRICE_BUDGET_SECONDS", "20"))
 # How often the data-API backup source reconciles (on-chain is primary, every poll).
 DATAAPI_INTERVAL_SECONDS: int = int(_get("DATAAPI_INTERVAL_SECONDS", "60"))
 TRADES_PER_POLL: int = int(_get("TRADES_PER_POLL", "200"))
