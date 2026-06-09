@@ -156,6 +156,9 @@ input[type=number] { width:64px; padding:5px 6px; border:1px solid #d0d7de; bord
 .colmenu label { display:flex; gap:8px; align-items:center; padding:5px 8px; font-size:13px; cursor:pointer; white-space:nowrap; border-radius:6px; }
 .colmenu label:hover { background:#f6f8fa; }
 .colmenu input { margin:0; }
+.colmenu .exitem { display:block; padding:7px 9px; font-size:13px; color:#1f2328; text-decoration:none; border-radius:6px; white-space:nowrap; }
+.colmenu .exitem:hover { background:#f6f8fa; }
+.colmenu .exitem .exsub { display:block; font-size:11px; color:#8c959f; }
 table { width:100%; border-collapse:collapse; background:#ffffff; border:1px solid #d0d7de; border-radius:10px; overflow:hidden; }
 th,td { padding:7px 10px; text-align:right; border-bottom:1px solid #d8dee4; white-space:nowrap; }
 th { background:#f6f8fa; color:#656d76; font-size:11px; text-transform:uppercase; position:sticky; top:0; }
@@ -254,8 +257,14 @@ def _render_tracker(s: dict, scale_val: float, date_filter: str = "") -> str:
         for l, v, c in cards)
 
     date_q = f"&date={date_filter}" if date_filter else ""
-    export_btn = (f'<a class="btn export" style="margin-left:auto" href="/export?t={name}{date_q}" '
-                  f'title="Download positions + P&amp;L summary as Excel">&darr; Export</a>')
+    export_btn = (
+        '<div class="dropdown" style="margin-left:auto">'
+        '<button class="btn" onclick="toggleMenu(event,\'exportmenu\')">&darr; Export &#9662;</button>'
+        '<div class="colmenu" id="exportmenu">'
+        '<div class="mh">Export as Excel</div>'
+        f'<a class="exitem" href="/export?t={name}{date_q}&kind=positions">Positions <span class="exsub">combined per event</span></a>'
+        f'<a class="exitem" href="/export?t={name}{date_q}&kind=trades">All individual trades <span class="exsub">every fill</span></a>'
+        '</div></div>')
     daily = summ.get("daily", [])[:14]
     if daily:
         allcls = "" if date_filter else " active"
@@ -295,7 +304,7 @@ def _render_tracker(s: dict, scale_val: float, date_filter: str = "") -> str:
         f'onchange="onColToggle()">{label}</label>' for k, label, _ in COLUMNS)
     tabletools = (
         '<div class="tabletools"><div class="dropdown">'
-        '<button class="btn" onclick="toggleColMenu(event)">&#9776; Columns &#9662;</button>'
+        '<button class="btn" onclick="toggleMenu(event,\'colmenu\')">&#9776; Columns &#9662;</button>'
         f'<div class="colmenu" id="colmenu"><div class="mh">Show columns</div>{col_menu}</div>'
         '</div></div>')
 
@@ -451,6 +460,141 @@ def _build_export(name: str, s: dict, rows: list[dict], live_mode: bool, date_fi
     return bio.getvalue()
 
 
+def _build_trades_export(name: str, path: str, date_filter: str, live_mode: bool) -> bytes:
+    """Render an .xlsx of EVERY individual trade (one row per fill) from the bot's Trades
+    sheet, read-only. Filtered to a day if given; in live mode, only real placed orders."""
+    from datetime import datetime, timezone
+    from io import BytesIO
+
+    from openpyxl import Workbook, load_workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    if not path or not os.path.exists(path):
+        raise FileNotFoundError("trade log not found")
+
+    src = load_workbook(path, read_only=True, data_only=True)
+    try:
+        ws_in = src["Trades"]
+        it = ws_in.iter_rows(values_only=True)
+        header = list(next(it))
+        idx = {h: i for i, h in enumerate(header) if h}
+        raw = [vals for vals in it if vals and vals[0] is not None]
+    finally:
+        src.close()
+
+    def g(vals, key):
+        i = idx.get(key)
+        return vals[i] if (i is not None and i < len(vals)) else ""
+
+    def numb(x):
+        if x in ("", None):
+            return ""
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return ""
+
+    def tfmt(ts, fmt):
+        try:
+            return datetime.fromtimestamp(int(float(ts)), tz=timezone.utc).strftime(fmt)
+        except (TypeError, ValueError, OSError, OverflowError):
+            return ""
+
+    sel = []
+    for v in raw:
+        if date_filter and tfmt(g(v, "trade_ts"), "%Y-%m-%d") != date_filter:
+            continue
+        if live_mode:
+            ls, oid = str(g(v, "live_status") or ""), str(g(v, "live_order_id") or "")
+            if not (ls.startswith("LIVE") and oid.strip()):
+                continue
+        sel.append(v)
+
+    CCY, PRICE, SIZE = "$#,##0.00", "0.000", "#,##0.0000"
+    NAVY, BLUE, GREEN, RED, LIGHT = "1F3864", "2F5496", "2E7D32", "C62828", "F2F6FC"
+    # (header, align, width, value-fn, number-format)
+    cols = [
+        ("Trade Time", "l", 17, lambda v: tfmt(g(v, "trade_ts"), "%Y-%m-%d %H:%M"), None),
+        ("Market", "l", 42, lambda v: g(v, "market_title"), None),
+        ("Outcome", "l", 20, lambda v: g(v, "outcome"), None),
+        ("Side", "c", 7, lambda v: g(v, "side"), None),
+        ("Size", "c", 12, lambda v: numb(g(v, "paper_size")), SIZE),
+        ("Our Entry", "c", 10, lambda v: numb(g(v, "paper_entry_price")), PRICE),
+        ("Whale Price", "c", 11, lambda v: numb(g(v, "rn1_price")), PRICE),
+        ("Cost", "c", 12, lambda v: numb(g(v, "paper_cost")), CCY),
+        ("Cur Price", "c", 10, lambda v: numb(g(v, "current_price")), PRICE),
+        ("P&L", "c", 12, lambda v: numb(g(v, "pnl")), CCY),
+        ("Lag s", "c", 8, lambda v: g(v, "detect_lag_s"), None),
+        ("Source", "c", 9, lambda v: g(v, "source"), None),
+        ("Status", "l", 16, lambda v: g(v, "live_status"), None),
+    ]
+    ncols = len(cols)
+    total_cost = sum(x for x in (numb(g(v, "paper_cost")) for v in sel) if isinstance(x, float))
+    total_pnl = sum(x for x in (numb(g(v, "pnl")) for v in sel) if isinstance(x, float))
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Trades"
+    period = date_filter or "All days"
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncols)
+    t = ws.cell(1, 1, f"Polymarket Copytrader  ·  @{name}  ·  {'LIVE orders' if live_mode else 'paper'}  ·  "
+                      f"individual trades  ·  {period}")
+    t.font = Font(bold=True, size=14, color="FFFFFF")
+    t.alignment = Alignment(horizontal="left", vertical="center")
+    for c in range(1, ncols + 1):
+        ws.cell(1, c).fill = PatternFill("solid", fgColor=NAVY)
+    ws.row_dimensions[1].height = 24
+
+    cards = [("TRADES", len(sel), None), ("TOTAL COST", total_cost, CCY), ("TOTAL P&L", total_pnl, CCY)]
+    base, rem = divmod(ncols, len(cards))
+    spans, start = [], 1
+    for i in range(len(cards)):
+        w = base + (1 if i < rem else 0)
+        spans.append((start, start + w - 1))
+        start += w
+    for (label, val, fmt), (c0, c1) in zip(cards, spans):
+        ws.merge_cells(start_row=2, start_column=c0, end_row=2, end_column=c1)
+        ws.merge_cells(start_row=3, start_column=c0, end_row=3, end_column=c1)
+        lc = ws.cell(2, c0, label)
+        lc.font = Font(bold=True, size=9, color="FFFFFF")
+        lc.alignment = Alignment(horizontal="center", vertical="center")
+        fill = GREEN if (fmt == CCY and val > 0) else (RED if (fmt == CCY and val < 0) else BLUE)
+        vc = ws.cell(3, c0, val)
+        vc.font = Font(bold=True, size=13, color="FFFFFF")
+        vc.alignment = Alignment(horizontal="center", vertical="center")
+        if fmt:
+            vc.number_format = fmt
+        for r in (2, 3):
+            for c in range(c0, c1 + 1):
+                ws.cell(r, c).fill = PatternFill("solid", fgColor=fill)
+    ws.row_dimensions[3].height = 22
+
+    hr = 5
+    for i, (label, _a, width, _fn, _fmt) in enumerate(cols, start=1):
+        cell = ws.cell(hr, i, label)
+        cell.font = Font(bold=True, size=10, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor=BLUE)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws.column_dimensions[get_column_letter(i)].width = width
+    for ri, v in enumerate(sel):
+        row = hr + 1 + ri
+        band = PatternFill("solid", fgColor=LIGHT) if ri % 2 else None
+        for ci, (_label, align, _w, fn, fmt) in enumerate(cols, start=1):
+            cell = ws.cell(row, ci, fn(v))
+            if fmt:
+                cell.number_format = fmt
+            if band:
+                cell.fill = band
+            cell.alignment = Alignment(horizontal="left" if align == "l" else "center")
+    ws.freeze_panes = f"A{hr + 1}"
+    ws.sheet_view.showGridLines = False
+
+    bio = BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+
 @app.route("/export")
 def export():
     if not _auth_ok():
@@ -461,12 +605,23 @@ def export():
         return Response("Unknown tracker", 404)
     s = states[name]
     live_mode = bool(s.get("live"))
-    rows = (s.get("live_positions") or []) if live_mode else s.get("positions", [])
     date_filter = request.args.get("date", "")
-    if date_filter:
-        rows = [r for r in rows if r.get("trade_date") == date_filter]
-    data = _build_export(name, s, rows, live_mode, date_filter)
-    fname = f"{name}_positions_{date_filter or 'all'}.xlsx"
+    kind = request.args.get("kind", "positions")
+
+    if kind == "trades":
+        path = os.path.join(DATA_DIR, s.get("excel_file") or "")
+        try:
+            data = _build_trades_export(name, path, date_filter, live_mode)
+        except Exception as exc:
+            return Response(f"Could not read trade log: {exc}", 500)
+        fname = f"{name}_trades_{date_filter or 'all'}.xlsx"
+    else:
+        rows = (s.get("live_positions") or []) if live_mode else s.get("positions", [])
+        if date_filter:
+            rows = [r for r in rows if r.get("trade_date") == date_filter]
+        data = _build_export(name, s, rows, live_mode, date_filter)
+        fname = f"{name}_positions_{date_filter or 'all'}.xlsx"
+
     return Response(data, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
@@ -538,8 +693,7 @@ def index():
       // the column menu open (so a refresh can't yank the menu out from under you).
       setInterval(function() {{
         var el = document.getElementById('scaleinput');
-        var menu = document.getElementById('colmenu');
-        if (menu && menu.classList.contains('open')) return;
+        if (document.querySelector('.colmenu.open')) return;   // any dropdown open
         if (el && document.activeElement === el) return;
         location.reload();
       }}, 30000);
@@ -568,14 +722,18 @@ def index():
         localStorage.setItem('pmHiddenCols', JSON.stringify(hidden));
         applyCols();
       }}
-      function toggleColMenu(e) {{
+      function toggleMenu(e, id) {{
         e.stopPropagation();
-        var m = document.getElementById('colmenu');
-        if (m) m.classList.toggle('open');
+        var target = document.getElementById(id);
+        document.querySelectorAll('.colmenu').forEach(function(m) {{
+          if (m !== target) m.classList.remove('open');   // only one open at a time
+        }});
+        if (target) target.classList.toggle('open');
       }}
       document.addEventListener('click', function(e) {{
-        var m = document.getElementById('colmenu');
-        if (m && m.classList.contains('open') && !m.contains(e.target)) m.classList.remove('open');
+        document.querySelectorAll('.colmenu.open').forEach(function(m) {{
+          if (!m.contains(e.target)) m.classList.remove('open');
+        }});
       }});
       document.addEventListener('DOMContentLoaded', function() {{
         var hidden = colHidden();
