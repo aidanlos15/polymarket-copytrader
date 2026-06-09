@@ -94,6 +94,44 @@ def get_price(token_id: str, side: str) -> float | None:
     return None
 
 
+def get_fill_price(token_id: str, side: str, shares: float) -> tuple[float | None, bool]:
+    """Realistic fill price for taking `shares` from the book — i.e. what a real market order
+    of OUR size would actually pay, slippage included, WITHOUT placing it.
+
+    Walks the book from the best price outward (lowest asks for a BUY, highest bids for a
+    SELL), filling `shares`, and returns (vwap, fully_filled). vwap is the volume-weighted
+    average price over the filled portion; fully_filled is False if the book didn't have
+    enough depth for our whole size. Returns (None, False) if the book is unavailable.
+    """
+    if shares is None or shares <= 0:
+        return None, False
+    data = _get(f"{config.CLOB_API}/book", {"token_id": token_id})
+    if not isinstance(data, dict):
+        return None, False
+    raw = data.get("asks") if side.upper() == "BUY" else data.get("bids")
+    levels = []
+    for lv in raw or []:
+        try:
+            levels.append((float(lv["price"]), float(lv["size"])))
+        except (TypeError, ValueError, KeyError):
+            continue
+    if not levels:
+        return None, False
+    # Best price first: a buyer takes the lowest asks; a seller hits the highest bids.
+    levels.sort(key=lambda x: x[0], reverse=(side.upper() == "SELL"))
+    remaining, cost, filled = shares, 0.0, 0.0
+    for price, size in levels:
+        take = min(size, remaining)
+        cost += take * price
+        filled += take
+        remaining -= take
+        if remaining <= 1e-9:
+            break
+    if filled <= 0:
+        return None, False
+    return cost / filled, remaining <= 1e-9
+
+
 def get_midpoint(token_id: str) -> float | None:
     """Midpoint (avg of best bid/ask) for a token. Returns None if the book is gone."""
     data = _get(f"{config.CLOB_API}/midpoint", {"token_id": token_id})

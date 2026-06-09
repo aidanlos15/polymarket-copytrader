@@ -109,14 +109,16 @@ def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[s
         if not fresh:
             continue
 
-        # Our real-time fill price (best ask for the side) = our figure. If the order-book
-        # read glitches (some near-resolved tokens return a junk 0), fall back to the whale's
-        # on-chain fill — within the copy window it's the real market price at that instant.
-        entry = pm.get_price(asset, side)
+        # Our realistic fill: walk the order book for OUR scaled size (the real price a market
+        # order of that size would pay, slippage included) — exactly what live mode would get,
+        # just without placing the order. Fall back to top-of-book, then the whale's on-chain
+        # fill, if the book read glitches.
+        paper_size = rn1_size * scale_frac
+        entry, _filled = pm.get_fill_price(asset, side, paper_size)
+        if entry is None or entry <= 0:
+            entry = pm.get_price(asset, side)
         if entry is None or entry <= 0:
             entry = rn1_price
-
-        paper_size = rn1_size * scale_frac
         paper_cost = paper_size * entry
 
         # Live-copy when the scaled order clears Polymarket's $1 minimum (it's already fresh).
