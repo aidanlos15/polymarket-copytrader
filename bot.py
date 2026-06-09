@@ -89,6 +89,18 @@ def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[s
             skipped += 1
             continue
 
+        # Detection lag = when we RECEIVED the on-chain logs (recv_ts, stamped in the
+        # detector) minus the block time. Computed up front, BEFORE our own get_price/
+        # order/Excel work, so it measures pure detection latency, not our processing.
+        ref = t.get("recv_ts")
+        try:
+            ref = float(ref) if ref else time.time()
+            lag = max(0, int(round(ref - float(t.get("timestamp", 0)))))
+        except (TypeError, ValueError):
+            lag = ""
+        if isinstance(lag, int):
+            lags.append(lag)
+
         # Price our paper fill at the *current* market price for that side.
         entry = pm.get_price(asset, side)
         if entry is None:
@@ -97,13 +109,6 @@ def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[s
 
         paper_size = rn1_size * scale_frac
         paper_cost = paper_size * entry
-
-        try:
-            lag = int(time.time()) - int(t.get("timestamp", 0))
-        except (TypeError, ValueError):
-            lag = ""
-        if isinstance(lag, int) and lag >= 0:
-            lags.append(lag)
 
         # Place (or simulate, in dry-run) the live market order mirroring this trade.
         # Only live-copy FRESH trades whose scaled order clears Polymarket's $1 minimum.

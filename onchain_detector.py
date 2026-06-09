@@ -158,6 +158,7 @@ class OnchainDetector:
         except Exception:
             return []
         self._last = latest
+        recv = time.time()   # the instant we learned of these trades (for the lag metric)
 
         txs: dict[str, str] = {}
         for l in logs:
@@ -174,6 +175,7 @@ class OnchainDetector:
             for tr in decode_trades(rcpt, self.whale):
                 tr.update(lookup_market(tr["asset"]))
                 tr["timestamp"] = ts
+                tr["recv_ts"] = recv
                 tr["transactionHash"] = txh
                 out.append(tr)
         return out
