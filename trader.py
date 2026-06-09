@@ -16,6 +16,7 @@ exchange contract (via the Polymarket UI or a web3 approval). Orders are rejecte
 from __future__ import annotations
 
 import os
+import threading
 
 import config
 
@@ -34,6 +35,7 @@ class Executor:
         self.client = None
         self._spent = 0.0       # USD spent on BUYs this run (for the daily cap)
         self._err = ""          # last connection error (e.g. no key)
+        self._lock = threading.Lock()  # serialise connect + order across threads
         print("  [trader] ready — live mode is controlled at runtime by the dashboard "
               "toggle, and requires a configured key.")
 
@@ -106,37 +108,40 @@ class Executor:
         if not fresh:  # backfill / stale trade — never live-copy
             return _blank("SKIPPED_STALE")
 
-        if side == "BUY" and self._spent + amount_usd > config.LIVE_DAILY_MAX_USD:
-            return _blank("SKIPPED_DAILY_CAP")
+        # Serialise the cap check + connect + order so two threads can't race the daily cap
+        # or the lazy client connect. (In practice only the detector thread places orders.)
+        with self._lock:
+            if side == "BUY" and self._spent + amount_usd > config.LIVE_DAILY_MAX_USD:
+                return _blank("SKIPPED_DAILY_CAP")
 
-        if not self._ensure_connected():   # no key / connect failed -> place nothing
-            return _blank("LIVE_NO_KEY")
+            if not self._ensure_connected():   # no key / connect failed -> place nothing
+                return _blank("LIVE_NO_KEY")
 
-        try:
-            from py_clob_client_v2 import MarketOrderArgs, OrderType
+            try:
+                from py_clob_client_v2 import MarketOrderArgs, OrderType
 
-            args = MarketOrderArgs(
-                token_id=str(token_id),
-                amount=float(amount_usd if side == "BUY" else shares),
-                side=side,  # V2 builder accepts the "BUY"/"SELL" string directly
-                order_type=OrderType.FAK,
-            )
-            # create_and_post_market_order builds + posts and auto-retries on a CLOB
-            # version bump (fill-and-kill = take whatever's on the book, cancel the rest).
-            resp = self.client.create_and_post_market_order(args, order_type=OrderType.FAK)
+                args = MarketOrderArgs(
+                    token_id=str(token_id),
+                    amount=float(amount_usd if side == "BUY" else shares),
+                    side=side,  # V2 builder accepts the "BUY"/"SELL" string directly
+                    order_type=OrderType.FAK,
+                )
+                # create_and_post_market_order builds + posts and auto-retries on a CLOB
+                # version bump (fill-and-kill = take whatever's on the book, cancel the rest).
+                resp = self.client.create_and_post_market_order(args, order_type=OrderType.FAK)
 
-            if not isinstance(resp, dict):
-                return _blank("ERROR_BADRESP")
-            ok = resp.get("success", False)
-            status = resp.get("status") or ("OK" if ok else "REJECTED")
-            if side == "BUY" and ok:
-                self._spent += amount_usd
-            return {
-                "live_status": f"LIVE:{status}"[:28],
-                "live_order_id": resp.get("orderID") or resp.get("orderId") or "",
-                "live_filled": resp.get("takingAmount", ""),
-                "live_avg_price": resp.get("price", ""),
-            }
-        except Exception as exc:  # never let an order error kill the loop
-            return {"live_status": f"ERROR:{type(exc).__name__}", "live_order_id": "",
+                if not isinstance(resp, dict):
+                    return _blank("ERROR_BADRESP")
+                ok = resp.get("success", False)
+                status = resp.get("status") or ("OK" if ok else "REJECTED")
+                if side == "BUY" and ok:
+                    self._spent += amount_usd
+                return {
+                    "live_status": f"LIVE:{status}"[:28],
+                    "live_order_id": resp.get("orderID") or resp.get("orderId") or "",
+                    "live_filled": resp.get("takingAmount", ""),
+                    "live_avg_price": resp.get("price", ""),
+                }
+            except Exception as exc:  # never let an order error kill the loop
+                return {"live_status": f"ERROR:{type(exc).__name__}", "live_order_id": "",
                     "live_filled": "", "live_avg_price": str(exc)[:40]}

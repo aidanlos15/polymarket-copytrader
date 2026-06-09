@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import statistics
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -51,6 +52,12 @@ def trade_id(t: dict) -> str:
     return f"{t.get('transactionHash', '')}:{t.get('asset', '')}"
 
 
+# Guards the shared `processed` dedupe set: the detector thread and the data-API backup
+# (main thread) both log trades, so check-and-reserve of a trade-id must be atomic or the
+# same trade could be logged twice.
+_PROC_LOCK = threading.Lock()
+
+
 def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[str],
                        executor: Executor, scale_frac: float,
                        source: str = "onchain", live: bool = False) -> tuple[int, list[int]]:
@@ -65,8 +72,11 @@ def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[s
     lags: list[int] = []
     for t in trades:
         tid = trade_id(t)
-        if tid in processed:
-            continue
+        # Atomically claim this trade-id so the other thread can't also process it.
+        with _PROC_LOCK:
+            if tid in processed:
+                continue
+            processed.add(tid)
 
         asset = str(t.get("asset", ""))
         side = str(t.get("side", "BUY")).upper()
@@ -124,7 +134,6 @@ def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[s
             "source": source,
             **exec_result,
         })
-        processed.add(tid)
         added += 1
         lag_txt = f"{lag}s" if isinstance(lag, int) else "?"
         print(f"  + [{source} {lag_txt}] {side} {paper_size:.4f} @ {entry:.4f} "
@@ -568,6 +577,25 @@ def read_live() -> bool:
         return bool(config.ENABLE_LIVE_TRADING)
 
 
+_scale_cache = 100.0
+
+
+def read_scale() -> float:
+    """Current copy SCALE % (0.01-100, decimals allowed), set by the dashboard in
+    scale_<NAME>.txt. Read by BOTH the detector and pricing threads each cycle. Keeps the
+    last good value if the file is briefly unreadable, so scale never spikes to 100%."""
+    global _scale_cache
+    base = os.path.dirname(os.path.abspath(config.EXCEL_PATH))
+    path = os.path.join(base, f"scale_{config.TARGET_NAME}.txt")
+    try:
+        v = float(open(path).read().strip())
+        if 0.01 <= v <= 100.0:
+            _scale_cache = v
+    except (OSError, ValueError):
+        pass
+    return _scale_cache
+
+
 def write_state_json(summary: dict, rows: list[dict],
                      live_summary: dict | None = None,
                      live_rows: list[dict] | None = None) -> None:
@@ -605,6 +633,27 @@ def dataapi_pass(sheets: ExcelClient, limit: int, executor: Executor, scale_frac
     return added
 
 
+def detection_loop(sheets: ExcelClient, detector: OnchainDetector, executor: Executor,
+                   processed: set[str], stop: threading.Event) -> None:
+    """DEDICATED detector thread — the ONLY thing in the hot path of a copy.
+
+    Each tick: poll the chain, and for any new whale trade place the live order (if live)
+    and log it. It shares nothing slow with the main thread: re-pricing every market and
+    writing the Excel/dashboard files happen elsewhere, so a copy is never stalled behind
+    them. This is what keeps real copy latency at the on-chain floor (~1-3s)."""
+    while not stop.is_set():
+        try:
+            live_on = read_live()
+            scale_frac = read_scale() / 100.0
+            onchain = detector.poll_once()
+            if onchain:
+                process_new_trades(sheets, onchain, processed, executor, scale_frac,
+                                   source="onchain", live=live_on)
+        except Exception as exc:  # never let the detector thread die
+            print(f"  [detect] error: {exc!r}")
+        stop.wait(config.ONCHAIN_POLL_SECONDS)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Polymarket paper-trade copytrading bot")
     ap.add_argument("--backfill", type=int, default=0,
@@ -620,63 +669,50 @@ def main() -> None:
     detector = OnchainDetector()
     print(f"On-chain detection via {config.POLYGON_HTTP.split('/v2/')[0]}/v2/***")
 
-    # Scale (1-100%) is set from the web dashboard, stored in scale_<NAME>.txt next to the
-    # Excel file. Default 100% (full size); trades are recorded at the target's full size
-    # (rn1_size) and re-scaled to this % every cycle, so changing it recomputes all history.
-    scale_pct = 100.0
-    scale_file = os.path.join(os.path.dirname(os.path.abspath(config.EXCEL_PATH)),
-                              f"scale_{config.TARGET_NAME}.txt")
+    # Shared dedupe set, seeded once from the file. Both threads check-and-reserve under
+    # _PROC_LOCK, so it stays consistent without re-reading the whole sheet every loop.
+    processed = sheets.read_processed_keys()
 
-    def current_scale() -> float:
-        nonlocal scale_pct
-        try:
-            v = float(open(scale_file).read().strip())
-            if 0.01 <= v <= 100.0:        # decimals allowed (e.g. 0.1 = 0.1%)
-                scale_pct = v
-        except (OSError, ValueError):
-            pass
-        return scale_pct
-
-    # First detect pass fetches `--backfill N` trades (seed history); after that, the
-    # normal per-poll window.
+    # First data-API pass fetches `--backfill N` trades (seed history); then the normal window.
     first_limit = args.backfill if args.backfill else config.TRADES_PER_POLL
 
     if args.once:
-        sp = current_scale()
-        processed = sheets.read_processed_keys()
+        sp = read_scale()
         dataapi_pass(sheets, first_limit, executor, sp / 100.0, processed)
         mark_to_market(sheets, sp)
         return
 
+    # Detection runs on its own thread (fast, never blocked). Pricing + the data-API
+    # backup + Excel/dashboard writes run here on the main thread on their own cadences.
+    stop = threading.Event()
+    det = threading.Thread(target=detection_loop, name="detector",
+                           args=(sheets, detector, executor, processed, stop), daemon=True)
+    det.start()
+
     first = True
     last_reprice = last_dataapi = 0.0
-    while True:
-        try:
-            sp = current_scale()
-            live_on = read_live()
-            processed = sheets.read_processed_keys()
+    try:
+        while True:
+            try:
+                sp = read_scale()
 
-            # PRIMARY: on-chain, every loop (~2s) — copies fire within ~1-2s of the whale.
-            onchain = detector.poll_once()
-            if onchain:
-                process_new_trades(sheets, onchain, processed, executor, sp / 100.0,
-                                   source="onchain", live=live_on)
+                # BACKUP/SEED: the data API. Seeds history on the first pass, then reconciles
+                # occasionally (catches anything on-chain missed); same dedupe -> no doubles.
+                # Backup trades are stale (lag > MAX_COPY_LAG) so they never place live orders.
+                if first or (time.monotonic() - last_dataapi) >= config.DATAAPI_INTERVAL_SECONDS:
+                    dataapi_pass(sheets, first_limit if first else config.TRADES_PER_POLL,
+                                 executor, sp / 100.0, processed, live=read_live())
+                    last_dataapi = time.monotonic()
 
-            # BACKUP/SEED: the data API. Seeds history on the first loop, then reconciles
-            # occasionally (catches anything on-chain missed); same dedupe -> no doubles.
-            # NB: backup trades are stale (lag > MAX_COPY_LAG) so they never place live orders.
-            if first or (time.monotonic() - last_dataapi) >= config.DATAAPI_INTERVAL_SECONDS:
-                dataapi_pass(sheets, first_limit if first else config.TRADES_PER_POLL,
-                             executor, sp / 100.0, processed, live=live_on)
-                last_dataapi = time.monotonic()
-
-            if first or (time.monotonic() - last_reprice) >= config.REPRICE_INTERVAL_SECONDS:
-                mark_to_market(sheets, sp)
-                last_reprice = time.monotonic()
-            first = False
-        except Exception as exc:  # keep the loop alive across transient failures
-            print(f"  cycle error: {exc!r}")
-        time.sleep(config.ONCHAIN_POLL_SECONDS)
+                if first or (time.monotonic() - last_reprice) >= config.REPRICE_INTERVAL_SECONDS:
+                    mark_to_market(sheets, sp)
+                    last_reprice = time.monotonic()
+                first = False
+            except Exception as exc:  # keep the loop alive across transient failures
+                print(f"  cycle error: {exc!r}")
+            time.sleep(1.0)  # light tick; reprice/data-API gated by their own intervals
+    finally:
+        stop.set()
 
 
 if __name__ == "__main__":

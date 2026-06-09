@@ -14,6 +14,7 @@ Excel, saving may fail with PermissionError — close it (or saving will retry n
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any
 
 from openpyxl import Workbook, load_workbook
@@ -90,6 +91,10 @@ _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 
 class ExcelClient:
     def __init__(self) -> None:
+        # The workbook object is NOT thread-safe: the detector thread appends trades while
+        # the main thread re-prices/saves. This reentrant lock serialises every access to
+        # self._wb (append / read / mark / write / save) so the two threads can't corrupt it.
+        self._lock = threading.RLock()
         self.path = config.EXCEL_PATH
         if os.path.exists(self.path):
             try:
@@ -160,12 +165,13 @@ class ExcelClient:
         tx_i = TRADES_HEADER.index("tx_hash")
         tok_i = TRADES_HEADER.index("token_id")
         keys: set[str] = set()
-        for vals in self._trades.iter_rows(min_row=2, values_only=True):
-            if vals[0] is None:
-                continue
-            tx = vals[tx_i] if tx_i < len(vals) else ""
-            tok = vals[tok_i] if tok_i < len(vals) else ""
-            keys.add(f"{tx}:{tok}")
+        with self._lock:
+            for vals in self._trades.iter_rows(min_row=2, values_only=True):
+                if vals[0] is None:
+                    continue
+                tx = vals[tx_i] if tx_i < len(vals) else ""
+                tok = vals[tok_i] if tok_i < len(vals) else ""
+                keys.add(f"{tx}:{tok}")
         return keys
 
     def read_scale_pct(self) -> float | None:
@@ -188,18 +194,24 @@ class ExcelClient:
             return None
 
     def append_trade(self, row: dict[str, Any]) -> None:
-        self._trades.append([row.get(k, "") for k in TRADES_HEADER])
-        self._save()
+        with self._lock:
+            self._trades.append([row.get(k, "") for k in TRADES_HEADER])
+            self._save()
 
     def read_all_trades(self) -> list[dict]:
         out: list[dict] = []
-        for vals in self._trades.iter_rows(min_row=2, values_only=True):
-            if vals[0] is None:
-                continue
-            out.append({h: vals[i] if i < len(vals) else "" for i, h in enumerate(TRADES_HEADER)})
+        with self._lock:
+            for vals in self._trades.iter_rows(min_row=2, values_only=True):
+                if vals[0] is None:
+                    continue
+                out.append({h: vals[i] if i < len(vals) else "" for i, h in enumerate(TRADES_HEADER)})
         return out
 
     def update_trade_marks(self, marks_by_id: dict[str, dict]) -> None:
+        with self._lock:
+            self._update_trade_marks_impl(marks_by_id)
+
+    def _update_trade_marks_impl(self, marks_by_id: dict[str, dict]) -> None:
         """Write the per-cycle columns onto each Trades row (matched by trade_id) and
         hide rows that fall below the $1 minimum at the current scale, then re-style."""
         cols = {name: TRADES_HEADER.index(name) + 1 for name in TRADE_MARK_COLS}
@@ -221,6 +233,11 @@ class ExcelClient:
 
     def write_positions(self, rows: list[dict[str, Any]], summary: dict[str, Any],
                         scale_pct: float = 1.0) -> None:
+        with self._lock:
+            self._write_positions_impl(rows, summary, scale_pct)
+
+    def _write_positions_impl(self, rows: list[dict[str, Any]], summary: dict[str, Any],
+                              scale_pct: float = 1.0) -> None:
         """Rebuild the Positions sheet: a pinned summary dashboard on top, an editable
         SCALE % input, then the per-token table. Frozen panes keep it all visible."""
         ws = self._positions
