@@ -159,6 +159,7 @@ _RESOLVED_CACHE: dict[str, dict[str, float]] = {}
 # we can round-robin stalest-first across cycles.
 _OPEN_PRICE_CACHE: dict[str, dict[str, float]] = {}     # conditionId -> {token: price}
 _LAST_PRICED_AT: dict[str, float] = {}                  # conditionId -> time.monotonic()
+_last_trade_marks_at = 0.0                              # last heavy Excel Trades re-mark
 
 
 def fetch_current_prices(trade_rows: list[dict]) -> tuple[dict[str, float], dict[str, bool]]:
@@ -315,8 +316,8 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
         else:
             a["net_paper_size"] -= size
 
-    # Write per-trade marks back to the Trades sheet.
-    sheets.update_trade_marks(marks)
+    # (The per-trade marks are pushed to the Excel Trades sheet later, gated — rewriting the
+    # full history is expensive and must never block the dashboard. See end of function.)
 
     # Build the per-token Positions view and split Open vs Resolved.
     rows: list[dict] = []
@@ -404,8 +405,19 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
     # Live-only view (real placed orders), computed from the same trades + prices.
     live_rows, live_summary = build_live_view(trades, price_by_token, resolved_by_condition)
 
-    sheets.write_positions(rows, summary, scale_pct=scale_pct)
+    # DASHBOARD FIRST: write the small JSON the web dashboard reads BEFORE any expensive
+    # Excel work, so the dashboard refreshes every cycle no matter how big the history is.
     write_state_json(summary, rows, live_summary, live_rows)
+
+    # Excel view (secondary). The Positions sheet is small (rebuilt each cycle); the heavy
+    # full-history Trades re-mark runs only every TRADE_MARKS_INTERVAL_SECONDS.
+    global _last_trade_marks_at
+    sheets.write_positions(rows, summary, scale_pct=scale_pct)
+    if (time.monotonic() - _last_trade_marks_at) >= config.TRADE_MARKS_INTERVAL_SECONDS:
+        sheets.update_trade_marks(marks)
+        _last_trade_marks_at = time.monotonic()
+    sheets.flush()   # one disk write per cycle (coalesces this cycle's appends + writes)
+
     print(f"  scale {scale_pct:g}% | counted {priced} (hidden <$1: {hidden}, unpriced {unpriced}) "
           f"| open {open_count} (value ${portfolio_value:,.2f}) | "
           f"resolved {resolved_count} (real ${realized_pnl:,.2f}) | total P&L ${total_pnl:,.2f}")

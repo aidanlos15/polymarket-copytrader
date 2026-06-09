@@ -95,6 +95,11 @@ class ExcelClient:
         # the main thread re-prices/saves. This reentrant lock serialises every access to
         # self._wb (append / read / mark / write / save) so the two threads can't corrupt it.
         self._lock = threading.RLock()
+        # openpyxl re-serialises the WHOLE workbook on every save, which is slow once the
+        # history is large. So mutations only mark the book dirty; the actual disk write is
+        # deferred to flush() (the bot calls it once per reprice cycle). This keeps trade
+        # appends near-instant so the bot never stalls behind Excel I/O.
+        self._dirty = False
         self.path = config.EXCEL_PATH
         if os.path.exists(self.path):
             try:
@@ -119,7 +124,7 @@ class ExcelClient:
         self._wb._sheets.remove(self._positions)
         self._wb._sheets.insert(0, self._positions)
         self._wb.active = 0
-        self._save()
+        self._save(force=True)
 
     def _ensure_ws(self, title: str, header: list[str], enforce_header: bool):
         if title in self._wb.sheetnames:
@@ -135,19 +140,36 @@ class ExcelClient:
                 ws.append(header)
         return ws
 
-    def _save(self) -> None:
-        """Atomic save: write to a temp file, then os.replace() into place. A crash/kill
-        mid-write only ever damages the temp file, never the real workbook."""
+    def _save(self, force: bool = False) -> None:
+        """Mark the workbook dirty. The actual (expensive) disk write is deferred to flush(),
+        which the bot calls once per reprice cycle — so frequent trade appends don't each
+        re-serialise the whole history. force=True writes now (used once at startup).
+        Callers already hold self._lock."""
+        self._dirty = True
+        if force:
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        """Atomic save: temp file then os.replace(). A crash mid-write only damages the temp
+        file, never the real workbook. Caller must hold self._lock."""
+        if not self._dirty:
+            return
         tmp = self.path + ".saving.tmp"
         try:
             self._wb.save(tmp)
             os.replace(tmp, self.path)
+            self._dirty = False
         except PermissionError:
             print(f"  [excel] cannot save — is '{self.path}' open in Excel? Will retry next cycle.")
             self._cleanup(tmp)
         except Exception as exc:  # never let a save error kill the loop
             print(f"  [excel] save error: {exc!r}")
             self._cleanup(tmp)
+
+    def flush(self) -> None:
+        """Write pending changes to disk now (called once per reprice cycle by the bot)."""
+        with self._lock:
+            self._flush_locked()
 
     @staticmethod
     def _cleanup(path: str) -> None:
