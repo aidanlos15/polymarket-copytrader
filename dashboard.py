@@ -479,9 +479,13 @@ def _excel_path_for(s: dict, name: str) -> str:
     return ""
 
 
-def _build_trades_export(name: str, path: str, date_filter: str, live_mode: bool) -> bytes:
+def _build_trades_export(name: str, path: str, date_filter: str, live_mode: bool, s: dict) -> bytes:
     """Render an .xlsx of EVERY individual trade (one row per fill) from the bot's Trades
-    sheet, read-only. Filtered to a day if given; in live mode, only real placed orders."""
+    sheet, read-only. Crucially, P&L / cost / current price are RECOMPUTED live from the
+    current scale and the current prices in the positions state — NOT read from the Trades
+    sheet's stale mark columns — so the totals reconcile with the Positions export. Cost &
+    P&L are shown only for 'counted' trades (priced and >= $1 at the current scale), exactly
+    the set the positions view aggregates, so the per-row values sum to the totals."""
     from datetime import datetime, timezone
     from io import BytesIO
 
@@ -506,13 +510,11 @@ def _build_trades_export(name: str, path: str, date_filter: str, live_mode: bool
         i = idx.get(key)
         return vals[i] if (i is not None and i < len(vals)) else ""
 
-    def numb(x):
-        if x in ("", None):
-            return ""
+    def numf(x):
         try:
             return float(x)
         except (TypeError, ValueError):
-            return ""
+            return 0.0
 
     def tfmt(ts, fmt):
         try:
@@ -520,7 +522,45 @@ def _build_trades_export(name: str, path: str, date_filter: str, live_mode: bool
         except (TypeError, ValueError, OSError, OverflowError):
             return ""
 
-    sel = []
+    # Current prices + scale from the SAME state the Positions view uses, so totals match.
+    view = (s.get("live_summary") or {}) if live_mode else (s.get("summary") or {})
+    pos = (s.get("live_positions") or []) if live_mode else (s.get("positions") or [])
+    price_map: dict[str, float] = {}
+    for p in pos:
+        tok = str(p.get("token_id", ""))
+        cp = p.get("current_price")
+        if tok and cp not in (None, ""):
+            try:
+                price_map[tok] = float(cp)
+            except (TypeError, ValueError):
+                pass
+    try:
+        scale_frac = float(view.get("scale_pct") or 100) / 100.0
+    except (TypeError, ValueError):
+        scale_frac = 1.0
+    MIN_USD = 1.0
+
+    def calc(v):
+        """Returns (side, size, entry, cost, cur, pnl, counted) recomputed live."""
+        token = str(g(v, "token_id") or "")
+        side = str(g(v, "side") or "BUY").upper()
+        cur = price_map.get(token)            # None if this token isn't a priced position
+        if live_mode:
+            entry = numf(g(v, "live_avg_price")) or numf(g(v, "paper_entry_price"))
+            filled = numf(g(v, "live_filled"))
+            size = filled if filled > 0 else numf(g(v, "rn1_size")) * numf(g(v, "scale_ratio"))
+            counted = cur is not None and size > 0 and entry > 0
+        else:
+            entry = numf(g(v, "paper_entry_price"))
+            size = numf(g(v, "rn1_size")) * scale_frac
+            counted = cur is not None and (size * entry) >= MIN_USD
+        cost = size * entry
+        pnl = None if cur is None else (size * (cur - entry) if side == "BUY" else size * (entry - cur))
+        return side, size, entry, cost, cur, pnl, counted
+
+    sel, calcs = [], []
+    counted_n = 0
+    total_cost = total_pnl = 0.0
     for v in raw:
         if date_filter and tfmt(g(v, "trade_ts"), "%Y-%m-%d") != date_filter:
             continue
@@ -528,29 +568,25 @@ def _build_trades_export(name: str, path: str, date_filter: str, live_mode: bool
             ls, oid = str(g(v, "live_status") or ""), str(g(v, "live_order_id") or "")
             if not (ls.startswith("LIVE") and oid.strip()):
                 continue
+        c = calc(v)
         sel.append(v)
+        calcs.append(c)
+        side, size, entry, cost, cur, pnl, counted = c
+        if counted:
+            counted_n += 1
+            if side == "BUY":
+                total_cost += cost
+            if pnl is not None:
+                total_pnl += pnl
 
     CCY, PRICE, SIZE = "$#,##0.00", "0.000", "#,##0.0000"
     NAVY, BLUE, GREEN, RED, LIGHT = "1F3864", "2F5496", "2E7D32", "C62828", "F2F6FC"
-    # (header, align, width, value-fn, number-format)
-    cols = [
-        ("Trade Time", "l", 17, lambda v: tfmt(g(v, "trade_ts"), "%Y-%m-%d %H:%M"), None),
-        ("Market", "l", 42, lambda v: g(v, "market_title"), None),
-        ("Outcome", "l", 20, lambda v: g(v, "outcome"), None),
-        ("Side", "c", 7, lambda v: g(v, "side"), None),
-        ("Size", "c", 12, lambda v: numb(g(v, "paper_size")), SIZE),
-        ("Our Entry", "c", 10, lambda v: numb(g(v, "paper_entry_price")), PRICE),
-        ("Whale Price", "c", 11, lambda v: numb(g(v, "rn1_price")), PRICE),
-        ("Cost", "c", 12, lambda v: numb(g(v, "paper_cost")), CCY),
-        ("Cur Price", "c", 10, lambda v: numb(g(v, "current_price")), PRICE),
-        ("P&L", "c", 12, lambda v: numb(g(v, "pnl")), CCY),
-        ("Lag s", "c", 8, lambda v: g(v, "detect_lag_s"), None),
-        ("Source", "c", 9, lambda v: g(v, "source"), None),
-        ("Status", "l", 16, lambda v: g(v, "live_status"), None),
-    ]
+    cols = [("Trade Time", "l", 17, None), ("Market", "l", 42, None), ("Outcome", "l", 20, None),
+            ("Side", "c", 7, None), ("Size", "c", 12, SIZE), ("Our Entry", "c", 10, PRICE),
+            ("Whale Price", "c", 11, PRICE), ("Cost", "c", 12, CCY), ("Cur Price", "c", 10, PRICE),
+            ("P&L", "c", 12, CCY), ("Lag s", "c", 8, None), ("Source", "c", 9, None),
+            ("Status", "l", 16, None)]
     ncols = len(cols)
-    total_cost = sum(x for x in (numb(g(v, "paper_cost")) for v in sel) if isinstance(x, float))
-    total_pnl = sum(x for x in (numb(g(v, "pnl")) for v in sel) if isinstance(x, float))
 
     wb = Workbook()
     ws = wb.active
@@ -561,11 +597,18 @@ def _build_trades_export(name: str, path: str, date_filter: str, live_mode: bool
                       f"individual trades  ·  {period}")
     t.font = Font(bold=True, size=14, color="FFFFFF")
     t.alignment = Alignment(horizontal="left", vertical="center")
-    for c in range(1, ncols + 1):
-        ws.cell(1, c).fill = PatternFill("solid", fgColor=NAVY)
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=ncols)
+    sub = ws.cell(2, 1, f"Updated {view.get('last_updated','')}   ·   {len(sel)} trades   ·   "
+                        f"{counted_n} counted (priced & ≥ $1 at current scale)   ·   "
+                        f"P&L/cost shown for counted trades only, to match the Positions view")
+    sub.font = Font(size=10, italic=True, color="D9E1F2")
+    for r in (1, 2):
+        for c in range(1, ncols + 1):
+            ws.cell(r, c).fill = PatternFill("solid", fgColor=NAVY)
     ws.row_dimensions[1].height = 24
 
-    cards = [("TRADES", len(sel), None), ("TOTAL COST", total_cost, CCY), ("TOTAL P&L", total_pnl, CCY)]
+    cards = [("TRADES", f"{counted_n} / {len(sel)}", None), ("TOTAL COST", total_cost, CCY),
+             ("TOTAL P&L", total_pnl, CCY)]
     base, rem = divmod(ncols, len(cards))
     spans, start = [], 1
     for i in range(len(cards)):
@@ -573,35 +616,42 @@ def _build_trades_export(name: str, path: str, date_filter: str, live_mode: bool
         spans.append((start, start + w - 1))
         start += w
     for (label, val, fmt), (c0, c1) in zip(cards, spans):
-        ws.merge_cells(start_row=2, start_column=c0, end_row=2, end_column=c1)
         ws.merge_cells(start_row=3, start_column=c0, end_row=3, end_column=c1)
-        lc = ws.cell(2, c0, label)
+        ws.merge_cells(start_row=4, start_column=c0, end_row=4, end_column=c1)
+        lc = ws.cell(3, c0, label)
         lc.font = Font(bold=True, size=9, color="FFFFFF")
         lc.alignment = Alignment(horizontal="center", vertical="center")
-        fill = GREEN if (fmt == CCY and val > 0) else (RED if (fmt == CCY and val < 0) else BLUE)
-        vc = ws.cell(3, c0, val)
+        fill = GREEN if (fmt == CCY and isinstance(val, (int, float)) and val > 0) else \
+            (RED if (fmt == CCY and isinstance(val, (int, float)) and val < 0) else BLUE)
+        vc = ws.cell(4, c0, val)
         vc.font = Font(bold=True, size=13, color="FFFFFF")
         vc.alignment = Alignment(horizontal="center", vertical="center")
         if fmt:
             vc.number_format = fmt
-        for r in (2, 3):
+        for r in (3, 4):
             for c in range(c0, c1 + 1):
                 ws.cell(r, c).fill = PatternFill("solid", fgColor=fill)
-    ws.row_dimensions[3].height = 22
+    ws.row_dimensions[4].height = 22
 
-    hr = 5
-    for i, (label, _a, width, _fn, _fmt) in enumerate(cols, start=1):
+    hr = 6
+    for i, (label, _a, width, _fmt) in enumerate(cols, start=1):
         cell = ws.cell(hr, i, label)
         cell.font = Font(bold=True, size=10, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor=BLUE)
         cell.alignment = Alignment(horizontal="center", vertical="center")
         ws.column_dimensions[get_column_letter(i)].width = width
-    for ri, v in enumerate(sel):
+    for ri, (v, c) in enumerate(zip(sel, calcs)):
+        side, size, entry, cost, cur, pnl, counted = c
+        vals = [tfmt(g(v, "trade_ts"), "%Y-%m-%d %H:%M"), g(v, "market_title"), g(v, "outcome"),
+                side, round(size, 6), round(entry, 6), numf(g(v, "rn1_price")),
+                (round(cost, 4) if counted else ""), (round(cur, 6) if cur is not None else ""),
+                (round(pnl, 4) if (counted and pnl is not None) else ""),
+                g(v, "detect_lag_s"), g(v, "source"), g(v, "live_status")]
         row = hr + 1 + ri
         band = PatternFill("solid", fgColor=LIGHT) if ri % 2 else None
-        for ci, (_label, align, _w, fn, fmt) in enumerate(cols, start=1):
-            cell = ws.cell(row, ci, fn(v))
-            if fmt:
+        for ci, ((_label, align, _w, fmt), val) in enumerate(zip(cols, vals), start=1):
+            cell = ws.cell(row, ci, val)
+            if fmt and isinstance(val, (int, float)):
                 cell.number_format = fmt
             if band:
                 cell.fill = band
@@ -633,7 +683,7 @@ def export():
             return Response("Trade log file not found for this tracker yet — try again in "
                             "a minute (the bot writes it each cycle).", 404)
         try:
-            data = _build_trades_export(name, path, date_filter, live_mode)
+            data = _build_trades_export(name, path, date_filter, live_mode, s)
         except Exception as exc:
             return Response(f"Could not read trade log: {exc}", 500)
         fname = f"{name}_trades_{date_filter or 'all'}.xlsx"
