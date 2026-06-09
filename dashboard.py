@@ -99,6 +99,14 @@ def _delta3(x) -> str:
         return str(x)
 
 
+def _pct1(x) -> str:
+    """Percent to 1dp, e.g. 12.5% — for delta percentage."""
+    try:
+        return f"{abs(float(x)):.1f}%"
+    except (TypeError, ValueError):
+        return ""
+
+
 def _cls(x) -> str:
     try:
         return "pos" if float(x) > 0 else ("neg" if float(x) < 0 else "")
@@ -201,6 +209,7 @@ COLUMNS = [
     ("our_entry", "Our Entry", False),
     ("whale_entry", "Whale Entry", False),
     ("delta", "Delta", False),
+    ("delta_pct", "Delta %", False),
     ("cur_price", "Cur Price", False),
     ("value", "Value", False),
     ("pnl", "P&L", False),
@@ -219,6 +228,7 @@ def _row_cells(r: dict) -> dict[str, str]:
         "our_entry": f'<td data-col="our_entry">{r.get("avg_entry_price","")}</td>',
         "whale_entry": f'<td data-col="whale_entry">{r.get("whale_entry","")}</td>',
         "delta": f'<td data-col="delta">{_delta3(r.get("delta", 0)) if r.get("delta", "") != "" else ""}</td>',
+        "delta_pct": f'<td data-col="delta_pct">{_pct1(r.get("delta_pct")) if r.get("delta_pct", "") != "" else ""}</td>',
         "cur_price": f'<td data-col="cur_price">{r.get("current_price","")}</td>',
         "value": f'<td data-col="value">{_money(r.get("current_value",0))}</td>',
         "pnl": f'<td data-col="pnl" class="{_cls(r.get("pnl",0))}">{_money(r.get("pnl",0))}</td>',
@@ -377,11 +387,12 @@ def _build_export(name: str, s: dict, rows: list[dict], live_mode: bool, date_fi
     tb = sum(f(r.get("total_bought")) for r in rows)
     avg_delta = (sum(f(r.get("total_bought")) * f(r.get("delta")) for r in rows) / tb) if tb > 1e-9 else 0.0
 
-    CCY, PRICE, SIZE = "$#,##0.00", "0.000", "#,##0.0000"
+    CCY, PRICE, SIZE, PCT = "$#,##0.00", "0.000", "#,##0.0000", '0.0"%"'
     NAVY, BLUE, GREEN, RED, LIGHT = "1F3864", "2F5496", "2E7D32", "C62828", "F2F6FC"
     cols = [("Market", "l", 42), ("Outcome", "l", 22), ("Status", "c", 10), ("Opened", "l", 17),
             ("Size", "c", 12), ("Our Entry", "c", 10), ("Whale Entry", "c", 12), ("Delta", "c", 9),
-            ("Cur Price", "c", 10), ("Value", "c", 12), ("P&L", "c", 12), ("Lag s", "c", 8)]
+            ("Delta %", "c", 9), ("Cur Price", "c", 10), ("Value", "c", 12), ("P&L", "c", 12),
+            ("Lag s", "c", 8)]
     ncols = len(cols)
 
     wb = Workbook()
@@ -437,14 +448,15 @@ def _build_export(name: str, s: dict, rows: list[dict], live_mode: bool, date_fi
         cell.fill = PatternFill("solid", fgColor=BLUE)
         cell.alignment = Alignment(horizontal="center", vertical="center")
         ws.column_dimensions[get_column_letter(i)].width = width
-    fmts = [None, None, None, None, SIZE, PRICE, PRICE, PRICE, PRICE, CCY, CCY, None]
+    fmts = [None, None, None, None, SIZE, PRICE, PRICE, PRICE, PCT, PRICE, CCY, CCY, None]
     for ri, r in enumerate(rows):
         row = hr + 1 + ri
         band = PatternFill("solid", fgColor=LIGHT) if ri % 2 else None
         vals = [r.get("market_title", ""), r.get("outcome", ""), r.get("status", ""),
                 r.get("trade_time", ""), f(r.get("net_paper_size")), f(r.get("avg_entry_price")),
-                f(r.get("whale_entry")), f(r.get("delta")), f(r.get("current_price")),
-                f(r.get("current_value")), f(r.get("pnl")), r.get("avg_lag_s", "")]
+                f(r.get("whale_entry")), f(r.get("delta")), f(r.get("delta_pct")),
+                f(r.get("current_price")), f(r.get("current_value")), f(r.get("pnl")),
+                r.get("avg_lag_s", "")]
         for ci, (v, fmt) in enumerate(zip(vals, fmts), start=1):
             cell = ws.cell(row, ci, v)
             if fmt:
@@ -579,13 +591,13 @@ def _build_trades_export(name: str, path: str, date_filter: str, live_mode: bool
             if pnl is not None:
                 total_pnl += pnl
 
-    CCY, PRICE, SIZE = "$#,##0.00", "0.000", "#,##0.0000"
+    CCY, PRICE, SIZE, PCT = "$#,##0.00", "0.000", "#,##0.0000", '0.0"%"'
     NAVY, BLUE, GREEN, RED, LIGHT = "1F3864", "2F5496", "2E7D32", "C62828", "F2F6FC"
     cols = [("Trade Time", "l", 17, None), ("Market", "l", 42, None), ("Outcome", "l", 20, None),
             ("Side", "c", 7, None), ("Size", "c", 12, SIZE), ("Our Entry", "c", 10, PRICE),
-            ("Whale Price", "c", 11, PRICE), ("Cost", "c", 12, CCY), ("Cur Price", "c", 10, PRICE),
-            ("P&L", "c", 12, CCY), ("Lag s", "c", 8, None), ("Source", "c", 9, None),
-            ("Status", "l", 16, None)]
+            ("Whale Price", "c", 11, PRICE), ("Delta %", "c", 9, PCT), ("Cost", "c", 12, CCY),
+            ("Cur Price", "c", 10, PRICE), ("P&L", "c", 12, CCY), ("Lag s", "c", 8, None),
+            ("Source", "c", 9, None), ("Status", "l", 16, None)]
     ncols = len(cols)
 
     wb = Workbook()
@@ -642,8 +654,10 @@ def _build_trades_export(name: str, path: str, date_filter: str, live_mode: bool
         ws.column_dimensions[get_column_letter(i)].width = width
     for ri, (v, c) in enumerate(zip(sel, calcs)):
         side, size, entry, cost, cur, pnl, counted = c
+        whale_p = numf(g(v, "rn1_price"))
+        dpct = round(abs(entry - whale_p) / whale_p * 100, 2) if whale_p > 1e-9 else 0.0
         vals = [tfmt(g(v, "trade_ts"), "%Y-%m-%d %H:%M"), g(v, "market_title"), g(v, "outcome"),
-                side, round(size, 6), round(entry, 6), numf(g(v, "rn1_price")),
+                side, round(size, 6), round(entry, 6), whale_p, dpct,
                 (round(cost, 4) if counted else ""), (round(cur, 6) if cur is not None else ""),
                 (round(pnl, 4) if (counted and pnl is not None) else ""),
                 g(v, "detect_lag_s"), g(v, "source"), g(v, "live_status")]
