@@ -117,6 +117,8 @@ h1 { font-size:18px; margin:0 0 2px; }
 .toggle { display:inline-flex; border:1px solid #d0d7de; border-radius:9px; overflow:hidden; }
 .toggle a { padding:7px 18px; text-decoration:none; color:#1f2328; background:#fff; font-weight:600; font-size:13px; }
 .toggle a.active { background:#0969da; color:#fff; }
+.toggle a .livedot { color:#cf222e; font-size:9px; font-weight:800; margin-left:5px; vertical-align:middle; }
+.toggle a.active .livedot { color:#ffd7d5; }
 .controls { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:12px 0; }
 .btn { padding:6px 12px; border:1px solid #d0d7de; border-radius:8px; background:#f6f8fa; cursor:pointer; font:inherit; font-size:13px; color:#1f2328; text-decoration:none; }
 .btn:hover { background:#eaeef2; }
@@ -368,9 +370,12 @@ def index():
         active = request.args.get("t") or names[0]
         if active not in states:
             active = names[0]
-        toggle = '<div class="toggle">' + "".join(
-            f'<a href="/?t={n}" class="{"active" if n == active else ""}">@{n}</a>' for n in names
-        ) + "</div>"
+        tabs = []
+        for n in names:
+            dot = ' <span class="livedot">● LIVE</span>' if states[n].get("live") else ""
+            cls = "active" if n == active else ""
+            tabs.append(f'<a href="/?t={n}" class="{cls}">@{n}{dot}</a>')
+        toggle = '<div class="toggle">' + "".join(tabs) + "</div>"
         s = states[active]
         scale_val = _read_scale(active)
         if scale_val is None:
