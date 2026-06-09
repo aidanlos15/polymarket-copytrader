@@ -249,14 +249,18 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
         token = str(t.get("token_id", ""))
         cid = str(t.get("condition_id", ""))
         side = str(t.get("side", "BUY")).upper()
-        # Stale/backfilled (data-API) trades were paper-priced at IMPORT time, which is
-        # unrelated to when the whale actually traded — that's what inflates both delta and
-        # P&L. Use the whale's own fill price for those; trust the fresh on-chain entry
-        # otherwise. This retroactively corrects existing positions on the next reprice.
-        if str(t.get("source", "")).lower() == "onchain":
-            entry = float(t.get("paper_entry_price") or 0)
-        else:
-            entry = float(t.get("rn1_price") or 0) or float(t.get("paper_entry_price") or 0)
+        # Choosing our paper ENTRY price. Trust the recorded entry ONLY if it's a fresh
+        # on-chain copy AND it's sane (close to the whale's actual fill). Otherwise — a
+        # stale/backfilled import (priced at import time), a bad/degenerate order-book read
+        # (some near-1.0 tokens return a junk ask), or a missing price — fall back to the
+        # whale's own fill price, the best proxy for the price when we'd have copied. This
+        # kills the spurious outlier deltas/P&L and retroactively corrects existing positions.
+        entry = float(t.get("paper_entry_price") or 0)
+        wp = float(t.get("rn1_price") or 0)
+        sane_fresh = (str(t.get("source", "")).lower() == "onchain"
+                      and entry > 0 and wp > 0 and abs(entry - wp) / wp <= 0.25)
+        if wp > 0 and not sane_fresh:
+            entry = wp
         rn1_size = float(t.get("rn1_size") or 0)
         size = rn1_size * scale_frac            # re-sized to the current scale
         cost = size * entry
