@@ -101,27 +101,26 @@ def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[s
         if isinstance(lag, int):
             lags.append(lag)
 
-        # Price our paper fill. For a FRESH copy (detected within the copy window), the live
-        # market price is what we'd realistically pay, so use it. For a STALE/backfilled
-        # trade, the *current* market price is unrelated to when the whale actually traded
-        # (the game/odds have moved since), so pricing our fill at it produces a spurious
-        # huge delta — use the whale's own fill price instead (the best proxy for "the price
-        # when we'd have copied"). This is the fix for the outlier delta %s.
-        fresh_for_pricing = isinstance(lag, int) and lag <= config.MAX_COPY_LAG_SECONDS
-        if fresh_for_pricing:
-            entry = pm.get_price(asset, side)
-            if entry is None:                       # book gone -> fall back to whale's price
-                entry = rn1_price
-        else:
-            entry = rn1_price or pm.get_price(asset, side) or 0.0
+        # ONLY copy trades we caught LIVE, within the copy window. A trade we missed in real
+        # time — surfaced only later by the stale data-API backfill — is ignored entirely:
+        # never logged, never ordered. You can't actually copy a trade after the fact, and
+        # pricing it at a later moment is exactly what produced the bogus figures.
+        fresh = isinstance(lag, int) and 0 <= lag <= config.MAX_COPY_LAG_SECONDS
+        if not fresh:
+            continue
+
+        # Our real-time fill price (best ask for the side) = our figure. If the order-book
+        # read glitches (some near-resolved tokens return a junk 0), fall back to the whale's
+        # on-chain fill — within the copy window it's the real market price at that instant.
+        entry = pm.get_price(asset, side)
+        if entry is None or entry <= 0:
+            entry = rn1_price
 
         paper_size = rn1_size * scale_frac
         paper_cost = paper_size * entry
 
-        # Place (or simulate, in dry-run) the live market order mirroring this trade.
-        # Only live-copy FRESH trades whose scaled order clears Polymarket's $1 minimum.
-        fresh = isinstance(lag, int) and 0 <= lag <= config.MAX_COPY_LAG_SECONDS
-        placeable = fresh and paper_cost >= config.MIN_TRADE_USD
+        # Live-copy when the scaled order clears Polymarket's $1 minimum (it's already fresh).
+        placeable = paper_cost >= config.MIN_TRADE_USD
         exec_result = executor.execute(
             token_id=asset, side=side, usd_amount=paper_cost, shares=paper_size,
             fresh=placeable, live=live)
@@ -248,18 +247,23 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
         tid = str(t.get("trade_id", ""))
         token = str(t.get("token_id", ""))
         cid = str(t.get("condition_id", ""))
+        # ONLY count trades we caught LIVE in real time (fresh on-chain). Trades we missed —
+        # surfaced only by the stale backfill, or caught on-chain but late — are ignored
+        # entirely; we never really copied them, so they don't belong in the portfolio. This
+        # also retroactively drops the existing backfilled junk on the next reprice.
+        try:
+            dlag = float(t.get("detect_lag_s"))
+        except (TypeError, ValueError):
+            dlag = 1e9
+        if str(t.get("source", "")).lower() != "onchain" or dlag > config.MAX_COPY_LAG_SECONDS:
+            continue
+
         side = str(t.get("side", "BUY")).upper()
-        # Choosing our paper ENTRY price. Trust the recorded entry ONLY if it's a fresh
-        # on-chain copy AND it's sane (close to the whale's actual fill). Otherwise — a
-        # stale/backfilled import (priced at import time), a bad/degenerate order-book read
-        # (some near-1.0 tokens return a junk ask), or a missing price — fall back to the
-        # whale's own fill price, the best proxy for the price when we'd have copied. This
-        # kills the spurious outlier deltas/P&L and retroactively corrects existing positions.
         entry = float(t.get("paper_entry_price") or 0)
         wp = float(t.get("rn1_price") or 0)
-        sane_fresh = (str(t.get("source", "")).lower() == "onchain"
-                      and entry > 0 and wp > 0 and abs(entry - wp) / wp <= 0.25)
-        if wp > 0 and not sane_fresh:
+        # Our real-time read IS the figure. Only fall back to the whale's on-chain fill for an
+        # obviously-broken read (glitchy 0 / wildly off) — harmless, since it was a live catch.
+        if wp > 0 and (entry <= 0 or abs(entry - wp) / wp > 0.25):
             entry = wp
         rn1_size = float(t.get("rn1_size") or 0)
         size = rn1_size * scale_frac            # re-sized to the current scale

@@ -576,6 +576,13 @@ def _build_trades_export(name: str, path: str, date_filter: str, live_mode: bool
     for v in raw:
         if date_filter and tfmt(g(v, "trade_ts"), "%Y-%m-%d") != date_filter:
             continue
+        # Only trades we caught LIVE (matches the positions view; missed/backfilled forgotten).
+        try:
+            _dlag = float(g(v, "detect_lag_s"))
+        except (TypeError, ValueError):
+            _dlag = 1e9
+        if str(g(v, "source") or "").lower() != "onchain" or _dlag > 120:
+            continue
         if live_mode:
             ls, oid = str(g(v, "live_status") or ""), str(g(v, "live_order_id") or "")
             if not (ls.startswith("LIVE") and oid.strip()):
