@@ -183,7 +183,7 @@ class ExcelClient:
             finally:
                 wb.close()
             pct = float(val)
-            return pct if 1.0 <= pct <= 100.0 else None
+            return pct if 0.01 <= pct <= 100.0 else None
         except (OSError, ValueError, TypeError):
             return None
 
@@ -296,12 +296,12 @@ class ExcelClient:
         lab.font = Font(bold=True, size=11, color="FFD966")
         lab.alignment = Alignment(horizontal="right", vertical="center")
         lab.fill = PatternFill("solid", fgColor="3A3000")
-        inp = ws.cell(5, 2, round(scale_pct))
+        inp = ws.cell(5, 2, round(scale_pct, 3))
         inp.font = Font(bold=True, size=13, color="000000")
         inp.alignment = Alignment(horizontal="center", vertical="center")
         inp.fill = PatternFill("solid", fgColor="FFD966")   # yellow = editable
         inp.border = _BORDER
-        inp.number_format = "0"
+        inp.number_format = "0.###"
         note = ws.cell(5, 3, "← set the scale on the web dashboard (1–100); shown here for reference")
         note.font = Font(size=10, italic=True, color="8b949e")
         note.alignment = Alignment(horizontal="left", vertical="center")

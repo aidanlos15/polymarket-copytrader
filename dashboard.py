@@ -48,17 +48,17 @@ def _scale_path(name: str) -> str:
     return os.path.join(DATA_DIR, f"scale_{name}.txt")
 
 
-def _read_scale(name: str) -> int | None:
+def _read_scale(name: str) -> float | None:
     try:
-        v = int(float(open(_scale_path(name)).read().strip()))
-        return max(1, min(100, v))
+        v = float(open(_scale_path(name)).read().strip())
+        return max(0.01, min(100.0, v))
     except (OSError, ValueError):
         return None
 
 
-def _write_scale(name: str, v: int) -> None:
+def _write_scale(name: str, v: float) -> None:
     with open(_scale_path(name), "w") as fh:
-        fh.write(str(v))
+        fh.write(f"{v:g}")
 
 
 def _live_path(name: str) -> str:
@@ -127,6 +127,18 @@ input[type=number] { width:64px; padding:5px 6px; border:1px solid #d0d7de; bord
 .card.green { background:#dafbe1; border-color:#2da44e; }
 .card.red { background:#ffebe9; border-color:#cf222e; }
 .tablewrap { overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:10px; }
+/* Full-bleed: break the table out of the centered .wrap so it spans the whole screen. */
+.fullbleed { width:100vw; margin-left:calc(50% - 50vw); margin-right:calc(50% - 50vw); }
+.fullbleed.tablewrap { border-radius:0; }
+.fullbleed table { border-radius:0; border-left:none; border-right:none; }
+.tabletools { width:100vw; margin-left:calc(50% - 50vw); display:flex; justify-content:flex-end; padding:0 12px; margin-bottom:6px; }
+.dropdown { position:relative; }
+.colmenu { display:none; position:absolute; right:0; top:34px; z-index:30; background:#fff; border:1px solid #d0d7de; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.12); padding:6px; min-width:172px; }
+.colmenu.open { display:block; }
+.colmenu .mh { font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:#8c959f; padding:4px 8px 6px; }
+.colmenu label { display:flex; gap:8px; align-items:center; padding:5px 8px; font-size:13px; cursor:pointer; white-space:nowrap; border-radius:6px; }
+.colmenu label:hover { background:#f6f8fa; }
+.colmenu input { margin:0; }
 table { width:100%; border-collapse:collapse; background:#ffffff; border:1px solid #d0d7de; border-radius:10px; overflow:hidden; }
 th,td { padding:7px 10px; text-align:right; border-bottom:1px solid #d8dee4; white-space:nowrap; }
 th { background:#f6f8fa; color:#656d76; font-size:11px; text-transform:uppercase; position:sticky; top:0; }
@@ -156,7 +168,43 @@ tr:hover td { background:#f6f8fa; }
 """
 
 
-def _render_tracker(s: dict, scale_val: int, date_filter: str = "") -> str:
+# Trade-list columns: (key, header label, left-aligned?). `key` is stamped as data-col on
+# every <th>/<td> so the column-chooser JS can show/hide it client-side. ALL columns are
+# always rendered (data is never dropped) — hiding is purely visual and remembered per
+# browser via localStorage.
+COLUMNS = [
+    ("market", "Market", True),
+    ("outcome", "Outcome", True),
+    ("status", "Status", False),
+    ("opened", "Opened", True),
+    ("size", "Size", False),
+    ("our_entry", "Our Entry", False),
+    ("whale_entry", "Whale Entry", False),
+    ("cur_price", "Cur Price", False),
+    ("value", "Value", False),
+    ("pnl", "P&L", False),
+    ("lag", "Lag s", False),
+]
+
+
+def _row_cells(r: dict) -> dict[str, str]:
+    st = r.get("status", "")
+    return {
+        "market": f'<td class="l" data-col="market">{r.get("market_title","")}</td>',
+        "outcome": f'<td class="l" data-col="outcome">{r.get("outcome","")}</td>',
+        "status": f'<td data-col="status"><span class="tag {st}">{st}</span></td>',
+        "opened": f'<td class="l" data-col="opened">{r.get("trade_time","")}</td>',
+        "size": f'<td data-col="size">{r.get("net_paper_size","")}</td>',
+        "our_entry": f'<td data-col="our_entry">{r.get("avg_entry_price","")}</td>',
+        "whale_entry": f'<td data-col="whale_entry">{r.get("whale_entry","")}</td>',
+        "cur_price": f'<td data-col="cur_price">{r.get("current_price","")}</td>',
+        "value": f'<td data-col="value">{_money(r.get("current_value",0))}</td>',
+        "pnl": f'<td data-col="pnl" class="{_cls(r.get("pnl",0))}">{_money(r.get("pnl",0))}</td>',
+        "lag": f'<td data-col="lag">{r.get("avg_lag_s","")}</td>',
+    }
+
+
+def _render_tracker(s: dict, scale_val: float, date_filter: str = "") -> str:
     name = s.get("name", "?")
     live_mode = bool(s.get("live"))
     # In live mode show ONLY real placed orders; paper data stays computed in the
@@ -210,20 +258,21 @@ def _render_tracker(s: dict, scale_val: int, date_filter: str = "") -> str:
                   f'({len(rows)}) · <a href="/?t={name}">show all</a></div>')
     body = []
     for r in rows[:200]:
-        st = r.get("status", "")
-        body.append(
-            f'<tr><td class="l">{r.get("market_title","")}</td>'
-            f'<td class="l">{r.get("outcome","")}</td>'
-            f'<td><span class="tag {st}">{st}</span></td>'
-            f'<td class="l">{r.get("trade_time","")}</td>'
-            f'<td>{r.get("net_paper_size","")}</td>'
-            f'<td>{r.get("avg_entry_price","")}</td>'
-            f'<td>{r.get("whale_entry","")}</td>'
-            f'<td>{r.get("current_price","")}</td>'
-            f'<td>{_money(r.get("current_value",0))}</td>'
-            f'<td class="{_cls(r.get("pnl",0))}">{_money(r.get("pnl",0))}</td>'
-            f'<td>{r.get("avg_lag_s","")}</td></tr>')
+        cells = _row_cells(r)
+        body.append("<tr>" + "".join(cells[k] for k, _, _ in COLUMNS) + "</tr>")
     note = f" (showing first 200 of {len(rows)})" if len(rows) > 200 else ""
+
+    header_cells = "".join(
+        f'<th data-col="{k}"{" class=\"l\"" if left else ""}>{label}</th>'
+        for k, label, left in COLUMNS)
+    col_menu = "".join(
+        f'<label><input type="checkbox" data-colkey="{k}" checked '
+        f'onchange="onColToggle()">{label}</label>' for k, label, _ in COLUMNS)
+    tabletools = (
+        '<div class="tabletools"><div class="dropdown">'
+        '<button class="btn" onclick="toggleColMenu(event)">&#9776; Columns &#9662;</button>'
+        f'<div class="colmenu" id="colmenu"><div class="mh">Show columns</div>{col_menu}</div>'
+        '</div></div>')
 
     if live_mode:
         controls = """
@@ -241,11 +290,11 @@ def _render_tracker(s: dict, scale_val: int, date_filter: str = "") -> str:
     <div class="controls">
       <form class="scale" method="post" action="/scale">
         <input type="hidden" name="tracker" value="{name}">
-        <label>Scale %: <input id="scaleinput" type="number" name="scale" min="1" max="100" value="{scale_val}"></label>
+        <label>Scale %: <input id="scaleinput" type="number" name="scale" min="0.01" max="100" step="0.01" value="{scale_val:g}"></label>
         <button class="btn">Apply</button>
       </form>
       <button class="btn" onclick="location.reload()">&#8635; Refresh</button>
-      <span class="hint">Scale recomputes ALL trades (only those &ge; $1 at that scale); applies within ~1 min.</span>
+      <span class="hint">Decimals allowed (e.g. 0.1 = 0.1%). Recomputes ALL trades (only those &ge; $1 at that scale); applies within ~1 min.</span>
     </div>"""
         meta = (f"Updated {summ.get('last_updated','')} · Scale {summ.get('scale_pct',100):g}%"
                 f" · Return {summ.get('total_pnl_pct',0):.2f}% · {summ.get('priced_count',0)} counted,"
@@ -258,10 +307,9 @@ def _render_tracker(s: dict, scale_val: int, date_filter: str = "") -> str:
       <div class="cards">{card_html}</div>
       {daily_html}
       {banner}
-      <div class="tablewrap"><table>
-        <tr><th class="l">Market</th><th class="l">Outcome</th><th>Status</th><th class="l">Opened</th><th>Size</th>
-            <th>Our Entry</th><th>Whale Entry</th><th>Cur Price</th><th>Value</th><th>P&L</th>
-            <th>Lag s</th></tr>
+      {tabletools}
+      <div class="tablewrap fullbleed"><table>
+        <tr>{header_cells}</tr>
         {''.join(body)}
       </table></div>"""
 
@@ -282,9 +330,9 @@ def set_scale():
         return Response("Auth required", 401, {"WWW-Authenticate": 'Basic realm="dashboard"'})
     name = request.form.get("tracker", "").strip()
     try:
-        v = max(1, min(100, int(float(request.form.get("scale", "100")))))
+        v = max(0.01, min(100.0, float(request.form.get("scale", "100"))))
     except ValueError:
-        v = 100
+        v = 100.0
     if name:
         _write_scale(name, v)
     return redirect(f"/?t={name}")
@@ -308,7 +356,7 @@ def index():
         s = states[active]
         scale_val = _read_scale(active)
         if scale_val is None:
-            scale_val = int(s.get("summary", {}).get("scale_pct", 100) or 100)
+            scale_val = float(s.get("summary", {}).get("scale_pct", 100) or 100)
         date_filter = request.args.get("date", "")
         inner = _render_tracker(s, scale_val, date_filter)
         # Live/paper toggle (top-right). Turning it ON asks for confirmation.
@@ -326,16 +374,56 @@ def index():
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Polymarket Copytrader</title><style>{CSS}</style>
     <script>
-      // Auto-refresh every 30s, but never while you're typing in the scale box.
+      // Auto-refresh every 30s, but never while you're typing in the scale box or have
+      // the column menu open (so a refresh can't yank the menu out from under you).
       setInterval(function() {{
         var el = document.getElementById('scaleinput');
-        if (!el || document.activeElement !== el) location.reload();
+        var menu = document.getElementById('colmenu');
+        if (menu && menu.classList.contains('open')) return;
+        if (el && document.activeElement === el) return;
+        location.reload();
       }}, 30000);
       function confirmLive(f) {{
         if (f.on.value === '1') return confirm(
           '⚠️ Switch to LIVE TRADING?\\n\\nReal orders with REAL MONEY will be placed for new copied trades. Only do this if you have funded the account and configured a key.');
         return true;
       }}
+      // --- Column chooser. Hidden columns persist per-browser in localStorage, so the
+      // choice survives the 30s auto-refresh. Data is always rendered; we only hide it. ---
+      function colHidden() {{
+        try {{ return JSON.parse(localStorage.getItem('pmHiddenCols') || '[]'); }}
+        catch (e) {{ return []; }}
+      }}
+      function applyCols() {{
+        var hidden = colHidden();
+        document.querySelectorAll('[data-col]').forEach(function(el) {{
+          el.style.display = hidden.indexOf(el.getAttribute('data-col')) >= 0 ? 'none' : '';
+        }});
+      }}
+      function onColToggle() {{
+        var hidden = [];
+        document.querySelectorAll('#colmenu input[data-colkey]').forEach(function(cb) {{
+          if (!cb.checked) hidden.push(cb.getAttribute('data-colkey'));
+        }});
+        localStorage.setItem('pmHiddenCols', JSON.stringify(hidden));
+        applyCols();
+      }}
+      function toggleColMenu(e) {{
+        e.stopPropagation();
+        var m = document.getElementById('colmenu');
+        if (m) m.classList.toggle('open');
+      }}
+      document.addEventListener('click', function(e) {{
+        var m = document.getElementById('colmenu');
+        if (m && m.classList.contains('open') && !m.contains(e.target)) m.classList.remove('open');
+      }});
+      document.addEventListener('DOMContentLoaded', function() {{
+        var hidden = colHidden();
+        document.querySelectorAll('#colmenu input[data-colkey]').forEach(function(cb) {{
+          cb.checked = hidden.indexOf(cb.getAttribute('data-colkey')) < 0;
+        }});
+        applyCols();
+      }});
     </script></head>
     <body><div class="wrap">
       <div class="topbar">

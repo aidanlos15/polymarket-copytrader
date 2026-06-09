@@ -350,7 +350,7 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
         "priced_count": priced,
         "unpriced_count": unpriced,
         "hidden_count": hidden,
-        "scale_pct": round(scale_pct),
+        "scale_pct": round(scale_pct, 3),
     }
     # Live-only view (real placed orders), computed from the same trades + prices.
     live_rows, live_summary = build_live_view(trades, price_by_token, resolved_by_condition)
@@ -371,13 +371,13 @@ def update_peak_open(open_value: float, scale_pct: float) -> float:
     peak = open_value
     try:
         d = json.load(open(path))
-        if round(float(d.get("scale", -1))) == round(scale_pct):
+        if round(float(d.get("scale", -1)), 3) == round(scale_pct, 3):
             peak = max(float(d.get("peak", 0)), open_value)
     except (OSError, ValueError, TypeError):
         pass
     try:
         with open(path + ".tmp", "w") as fh:
-            json.dump({"scale": round(scale_pct), "peak": peak}, fh)
+            json.dump({"scale": round(scale_pct, 3), "peak": peak}, fh)
         os.replace(path + ".tmp", path)
     except OSError:
         pass
@@ -631,7 +631,7 @@ def main() -> None:
         nonlocal scale_pct
         try:
             v = float(open(scale_file).read().strip())
-            if 1.0 <= v <= 100.0:
+            if 0.01 <= v <= 100.0:        # decimals allowed (e.g. 0.1 = 0.1%)
                 scale_pct = v
         except (OSError, ValueError):
             pass
