@@ -66,14 +66,14 @@ POLYGON_HTTP: str = _get("POLYGON_HTTP", "https://polygon-bor-rpc.publicnode.com
 # so polling faster than that just adds cheap eth_blockNumber checks but notices new blocks
 # sooner — directly lowering copy lag. 0.75s keeps most copies under ~1s; can go to 0.5.
 ONCHAIN_POLL_SECONDS: float = float(_get("ONCHAIN_POLL_SECONDS", "0.75"))
-# On startup, re-scan this many recent blocks (~2.1s each on Polygon, so 30 ≈ 60s) so a brief
-# restart/downtime never drops trades — any still within the copy window get copied,
-# already-logged ones are de-duped. Caught up in ONCHAIN_MAX_SCAN_BLOCKS-sized chunks.
-ONCHAIN_STARTUP_LOOKBACK_BLOCKS: int = int(_get("ONCHAIN_STARTUP_LOOKBACK_BLOCKS", "30"))
-# Max blocks per eth_getLogs scan. Alchemy's FREE tier caps getLogs at a 10-block range, so
-# this MUST stay <= 10 on free; backlogs/look-back catch up in 10-block chunks. (A paid RPC
-# plan allows far larger ranges — raise this then for faster catch-up.)
-ONCHAIN_MAX_SCAN_BLOCKS: int = int(_get("ONCHAIN_MAX_SCAN_BLOCKS", "10"))
+# On startup, re-scan this many recent blocks (~2.1s each on Polygon, so 100 ≈ 3.5 min) so a
+# restart/downtime never drops trades within the copy window — any still fresh get copied,
+# already-logged ones de-dupe. (Trades older than MAX_COPY_LAG are stale and ignored anyway.)
+ONCHAIN_STARTUP_LOOKBACK_BLOCKS: int = int(_get("ONCHAIN_STARTUP_LOOKBACK_BLOCKS", "100"))
+# Max blocks per eth_getLogs scan. Alchemy's FREE tier caps this at 10; a PAID (Pay As You Go)
+# plan allows large ranges, so 1000 lets even a long backlog catch up in one or two queries.
+# (If you ever revert to free, set ONCHAIN_MAX_SCAN_BLOCKS=10 in .env.)
+ONCHAIN_MAX_SCAN_BLOCKS: int = int(_get("ONCHAIN_MAX_SCAN_BLOCKS", "1000"))
 
 # --- Live trading (REAL MONEY) ----------------------------------------------
 # OFF by default: the bot records what it WOULD trade ("DRY_RUN") without sending.
