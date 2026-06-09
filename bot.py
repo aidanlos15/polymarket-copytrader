@@ -247,15 +247,16 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
         tid = str(t.get("trade_id", ""))
         token = str(t.get("token_id", ""))
         cid = str(t.get("condition_id", ""))
-        # ONLY count trades we caught LIVE in real time (fresh on-chain). Trades we missed —
-        # surfaced only by the stale backfill, or caught on-chain but late — are ignored
-        # entirely; we never really copied them, so they don't belong in the portfolio. This
-        # also retroactively drops the existing backfilled junk on the next reprice.
+        # ONLY count trades we caught LIVE, i.e. within the copy window (detect_lag small) —
+        # regardless of whether on-chain or the data-API backup caught it, since either way
+        # it's within the window we'd have actually copied/ordered. Trades we missed (only
+        # surfaced by the stale backfill, lag huge) are ignored — we never really copied them,
+        # so they don't belong in the portfolio. Also drops the existing backfilled junk.
         try:
             dlag = float(t.get("detect_lag_s"))
         except (TypeError, ValueError):
             dlag = 1e9
-        if str(t.get("source", "")).lower() != "onchain" or dlag > config.MAX_COPY_LAG_SECONDS:
+        if dlag > config.MAX_COPY_LAG_SECONDS:
             continue
 
         side = str(t.get("side", "BUY")).upper()

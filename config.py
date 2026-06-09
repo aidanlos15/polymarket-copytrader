@@ -70,6 +70,9 @@ ONCHAIN_POLL_SECONDS: float = float(_get("ONCHAIN_POLL_SECONDS", "0.75"))
 # brief restart/downtime never drops trades — any that are still within the copy window get
 # copied, already-logged ones are de-duped. Covers the restart gap end-to-end.
 ONCHAIN_STARTUP_LOOKBACK_BLOCKS: int = int(_get("ONCHAIN_STARTUP_LOOKBACK_BLOCKS", "120"))
+# Max blocks scanned per poll. Bounds the eth_getLogs range so a backlog can never grow into
+# a giant query the RPC rejects (which would stall detection); backlogs catch up in chunks.
+ONCHAIN_MAX_SCAN_BLOCKS: int = int(_get("ONCHAIN_MAX_SCAN_BLOCKS", "500"))
 
 # --- Live trading (REAL MONEY) ----------------------------------------------
 # OFF by default: the bot records what it WOULD trade ("DRY_RUN") without sending.

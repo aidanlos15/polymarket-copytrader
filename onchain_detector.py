@@ -112,6 +112,7 @@ class OnchainDetector:
         self.seen_tx: set[str] = set()
         self._block_time: dict[str, int] = {}
         self._last: int | None = None   # last polled block
+        self._fail = 0                  # consecutive getLogs failures (for retry-then-skip)
 
     def _rpc(self, method: str, params: list, tries: int = 3):
         """JSON-RPC call with a few retries, so a transient RPC blip never silently drops a
@@ -168,10 +169,22 @@ class OnchainDetector:
             self._last = max(0, latest - config.ONCHAIN_STARTUP_LOOKBACK_BLOCKS)
         if latest <= self._last:
             return []
-        logs = self._get_logs(self._last + 1, latest)
+        # Scan in BOUNDED chunks so a backlog (or the startup lookback) can't grow into a
+        # giant getLogs the RPC rejects — which would otherwise stall detection completely.
+        to = min(latest, self._last + config.ONCHAIN_MAX_SCAN_BLOCKS)
+        logs = self._get_logs(self._last + 1, to)
         if logs is None:
-            return []                      # transient RPC failure -> retry same range, no skip
-        self._last = latest
+            # Retry this same range for a few polls; if it KEEPS failing, advance past it so
+            # detection never stalls forever (worst case: a small, bounded, rare miss).
+            self._fail += 1
+            if self._fail < 6:
+                return []
+            print(f"  [onchain] getLogs {self._last + 1}-{to} keeps failing; skipping to stay live")
+            self._last = to
+            self._fail = 0
+            return []
+        self._fail = 0
+        self._last = to
         recv = time.time()   # the instant we learned of these trades (for the lag metric)
 
         txs: dict[str, str] = {}
