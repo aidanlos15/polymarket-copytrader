@@ -101,11 +101,19 @@ def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[s
         if isinstance(lag, int):
             lags.append(lag)
 
-        # Price our paper fill at the *current* market price for that side.
-        entry = pm.get_price(asset, side)
-        if entry is None:
-            # Fall back to the price RN1 actually traded at if the book is unavailable.
-            entry = float(t.get("price", 0) or 0)
+        # Price our paper fill. For a FRESH copy (detected within the copy window), the live
+        # market price is what we'd realistically pay, so use it. For a STALE/backfilled
+        # trade, the *current* market price is unrelated to when the whale actually traded
+        # (the game/odds have moved since), so pricing our fill at it produces a spurious
+        # huge delta — use the whale's own fill price instead (the best proxy for "the price
+        # when we'd have copied"). This is the fix for the outlier delta %s.
+        fresh_for_pricing = isinstance(lag, int) and lag <= config.MAX_COPY_LAG_SECONDS
+        if fresh_for_pricing:
+            entry = pm.get_price(asset, side)
+            if entry is None:                       # book gone -> fall back to whale's price
+                entry = rn1_price
+        else:
+            entry = rn1_price or pm.get_price(asset, side) or 0.0
 
         paper_size = rn1_size * scale_frac
         paper_cost = paper_size * entry
@@ -241,7 +249,14 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
         token = str(t.get("token_id", ""))
         cid = str(t.get("condition_id", ""))
         side = str(t.get("side", "BUY")).upper()
-        entry = float(t.get("paper_entry_price") or 0)
+        # Stale/backfilled (data-API) trades were paper-priced at IMPORT time, which is
+        # unrelated to when the whale actually traded — that's what inflates both delta and
+        # P&L. Use the whale's own fill price for those; trust the fresh on-chain entry
+        # otherwise. This retroactively corrects existing positions on the next reprice.
+        if str(t.get("source", "")).lower() == "onchain":
+            entry = float(t.get("paper_entry_price") or 0)
+        else:
+            entry = float(t.get("rn1_price") or 0) or float(t.get("paper_entry_price") or 0)
         rn1_size = float(t.get("rn1_size") or 0)
         size = rn1_size * scale_frac            # re-sized to the current scale
         cost = size * entry
