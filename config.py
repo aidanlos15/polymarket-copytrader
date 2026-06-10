@@ -99,3 +99,7 @@ LIVE_DAILY_MAX_USD: float = float(_get("LIVE_DAILY_MAX_USD", "500"))    # per-ru
 # Only live-copy FRESH trades: never place a real order for a trade older than this
 # (protects against backfills and stale/resolved markets). Seconds.
 MAX_COPY_LAG_SECONDS: int = int(_get("MAX_COPY_LAG_SECONDS", "120"))
+# Whale-match filter: skip a copy if OUR fill (book VWAP for our size) would land more than
+# this % away from the whale's own fill price — so every trade we DO copy is near the whale's
+# entry. 0 = off (copy everything). e.g. 1.0 only copies trades we can get within 1% of.
+MAX_ENTRY_DELTA_PCT: float = float(_get("MAX_ENTRY_DELTA_PCT", "0"))

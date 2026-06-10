@@ -82,6 +82,7 @@ def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[s
     """
     added = 0
     skipped = 0
+    skipped_far = 0
     lags: list[int] = []
     for t in trades:
         tid = trade_id(t)
@@ -135,6 +136,14 @@ def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[s
         paper_cost = paper_size * entry
         book_json = _book_for_storage(levels, rn1_size)
 
+        # Whale-match filter (opt-in): skip copies whose fill lands too far from the whale's
+        # price — keeps our average entry delta tiny, at the cost of skipping fast-moving /
+        # thin-market trades. 0 = off (copy everything).
+        if config.MAX_ENTRY_DELTA_PCT > 0 and rn1_price > 0 and \
+                abs(entry - rn1_price) / rn1_price * 100 > config.MAX_ENTRY_DELTA_PCT:
+            skipped_far += 1
+            continue
+
         # Live-copy when the scaled order clears Polymarket's $1 minimum (it's already fresh).
         placeable = paper_cost >= config.MIN_TRADE_USD
         exec_result = executor.execute(
@@ -171,6 +180,8 @@ def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[s
     # log on every routine detect pass (the latest-N window always has a few sub-$1s).
     if skipped and added:
         print(f"  (also skipped {skipped} sub-${config.MIN_TRADE_USD:g} dust trade(s))")
+    if skipped_far:
+        print(f"  (skipped {skipped_far} trade(s) over {config.MAX_ENTRY_DELTA_PCT:g}% entry delta)")
     return added, lags
 
 
