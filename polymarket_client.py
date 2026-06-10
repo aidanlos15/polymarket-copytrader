@@ -94,31 +94,31 @@ def get_price(token_id: str, side: str) -> float | None:
     return None
 
 
-def get_fill_price(token_id: str, side: str, shares: float) -> tuple[float | None, bool]:
-    """Realistic fill price for taking `shares` from the book — i.e. what a real market order
-    of OUR size would actually pay, slippage included, WITHOUT placing it.
-
-    Walks the book from the best price outward (lowest asks for a BUY, highest bids for a
-    SELL), filling `shares`, and returns (vwap, fully_filled). vwap is the volume-weighted
-    average price over the filled portion; fully_filled is False if the book didn't have
-    enough depth for our whole size. Returns (None, False) if the book is unavailable.
-    """
-    if shares is None or shares <= 0:
-        return None, False
+def get_book_levels(token_id: str, side: str) -> list[list[float]]:
+    """Order-book levels for the side we'd TAKE (asks for a BUY, bids for a SELL), sorted
+    best-price-first as [[price, size], ...]. Returns [] if the book is unavailable. Storing
+    these lets us re-price our fill for a DIFFERENT size later (e.g. when the scale changes)."""
     data = _get(f"{config.CLOB_API}/book", {"token_id": token_id})
     if not isinstance(data, dict):
-        return None, False
+        return []
     raw = data.get("asks") if side.upper() == "BUY" else data.get("bids")
     levels = []
     for lv in raw or []:
         try:
-            levels.append((float(lv["price"]), float(lv["size"])))
+            levels.append([float(lv["price"]), float(lv["size"])])
         except (TypeError, ValueError, KeyError):
             continue
-    if not levels:
-        return None, False
     # Best price first: a buyer takes the lowest asks; a seller hits the highest bids.
     levels.sort(key=lambda x: x[0], reverse=(side.upper() == "SELL"))
+    return levels
+
+
+def vwap_from_levels(levels, shares: float) -> tuple[float | None, bool]:
+    """Volume-weighted fill price for taking `shares` from `levels` (best-first) — the real
+    price a market order of THAT size pays, slippage included. Returns (vwap, fully_filled);
+    (None, False) if there are no levels or shares <= 0."""
+    if not levels or shares is None or shares <= 0:
+        return None, False
     remaining, cost, filled = shares, 0.0, 0.0
     for price, size in levels:
         take = min(size, remaining)
@@ -130,6 +130,11 @@ def get_fill_price(token_id: str, side: str, shares: float) -> tuple[float | Non
     if filled <= 0:
         return None, False
     return cost / filled, remaining <= 1e-9
+
+
+def get_fill_price(token_id: str, side: str, shares: float) -> tuple[float | None, bool]:
+    """Convenience: fetch the book and return the VWAP fill for `shares` (slippage included)."""
+    return vwap_from_levels(get_book_levels(token_id, side), shares)
 
 
 def get_midpoint(token_id: str) -> float | None:

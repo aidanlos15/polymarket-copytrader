@@ -32,6 +32,7 @@ TRADES_HEADER = [
     "paper_size", "paper_entry_price", "paper_cost", "tx_hash",
     "current_price", "current_value", "pnl", "pnl_updated", "detect_lag_s",
     "live_status", "live_order_id", "live_filled", "live_avg_price", "source",
+    "book_levels",
 ]
 
 # Aggregated per-token view. Rebuilt from scratch each cycle, so order is free to be
@@ -78,7 +79,7 @@ _NUMFMT = {
 
 # Trades columns to hide (long hashes / redundant) and friendly widths.
 _TRADES_HIDE = {"trade_id", "slug", "token_id", "condition_id", "tx_hash", "trade_ts",
-                "live_order_id"}
+                "live_order_id", "book_levels"}
 _WIDTHS = {
     "market_title": 42, "outcome": 20, "side": 7, "detected_at": 19, "pnl_updated": 19,
     "last_updated": 19, "price_source": 13, "token_id": 22, "condition_id": 22,

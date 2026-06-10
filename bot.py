@@ -45,6 +45,19 @@ def _f(x) -> float:
         return 0.0
 
 
+def _book_for_storage(levels: list, full_size: float) -> str:
+    """Trim the captured order book to just enough levels to fill the whale's FULL size — so
+    ANY scale up to 100% can be re-priced (slippage and all) later — and JSON-encode it
+    compactly. Capped at 50 levels to bound storage."""
+    out, cum = [], 0.0
+    for price, size in levels or []:
+        out.append([round(price, 6), round(size, 4)])
+        cum += size
+        if cum >= full_size or len(out) >= 50:
+            break
+    return json.dumps(out)
+
+
 def trade_id(t: dict) -> str:
     """Source-independent dedupe key. Keyed on transaction hash + outcome token so the
     SAME trade detected on-chain and later echoed by the data API maps to one key
@@ -109,17 +122,18 @@ def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[s
         if not fresh:
             continue
 
-        # Our realistic fill: walk the order book for OUR scaled size (the real price a market
-        # order of that size would pay, slippage included) — exactly what live mode would get,
-        # just without placing the order. Fall back to top-of-book, then the whale's on-chain
-        # fill, if the book read glitches.
+        # Our realistic fill: walk the order book for OUR scaled size (real price incl.
+        # slippage). We also STORE the book so changing the scale later re-prices the fill
+        # for the new size. Fall back to top-of-book, then the whale's fill, on a glitch.
         paper_size = rn1_size * scale_frac
-        entry, _filled = pm.get_fill_price(asset, side, paper_size)
+        levels = pm.get_book_levels(asset, side)
+        entry, _filled = pm.vwap_from_levels(levels, paper_size)
         if entry is None or entry <= 0:
             entry = pm.get_price(asset, side)
         if entry is None or entry <= 0:
             entry = rn1_price
         paper_cost = paper_size * entry
+        book_json = _book_for_storage(levels, rn1_size)
 
         # Live-copy when the scaled order clears Polymarket's $1 minimum (it's already fresh).
         placeable = paper_cost >= config.MIN_TRADE_USD
@@ -146,6 +160,7 @@ def process_new_trades(sheets: ExcelClient, trades: list[dict], processed: set[s
             "tx_hash": t.get("transactionHash", ""),
             "detect_lag_s": lag,
             "source": source,
+            "book_levels": book_json,
             **exec_result,
         })
         added += 1
@@ -262,14 +277,25 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
             continue
 
         side = str(t.get("side", "BUY")).upper()
-        entry = float(t.get("paper_entry_price") or 0)
-        wp = float(t.get("rn1_price") or 0)
-        # Our real-time read IS the figure. Only fall back to the whale's on-chain fill for an
-        # obviously-broken read (glitchy 0 / wildly off) — harmless, since it was a live catch.
-        if wp > 0 and (entry <= 0 or abs(entry - wp) / wp > 0.25):
-            entry = wp
         rn1_size = float(t.get("rn1_size") or 0)
         size = rn1_size * scale_frac            # re-sized to the current scale
+        wp = float(t.get("rn1_price") or 0)
+        # Re-price OUR fill at the CURRENT scale by re-walking the order book we captured at
+        # detection — so changing the scale correctly recomputes the slippage for the new
+        # (larger/smaller) size. Falls back to the recorded entry, then the whale's fill.
+        entry = None
+        _bl = t.get("book_levels")
+        if _bl:
+            try:
+                _levels = json.loads(_bl)
+            except (TypeError, ValueError):
+                _levels = None
+            if _levels:
+                entry, _ = pm.vwap_from_levels(_levels, size)
+        if entry is None or entry <= 0:
+            entry = float(t.get("paper_entry_price") or 0)
+        if (entry is None or entry <= 0 or entry > 1.0) and wp > 0:
+            entry = wp
         cost = size * entry
         cur = price_by_token.get(token)
 
