@@ -258,6 +258,7 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
     """
     now = _now_iso()
     scale_frac = scale_pct / 100.0
+    max_delta = read_max_delta()                # 0 = no limit; else hide trades over this %
     trades = sheets.read_all_trades()
     price_by_token, resolved_by_condition = fetch_current_prices(trades)
 
@@ -267,7 +268,7 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
         "market_title": "", "outcome": "", "condition_id": "", "cur_price": None,
         "whale_cost": 0.0, "lag_sum": 0.0, "lag_n": 0, "first_ts": 0,
     })
-    priced = unpriced = hidden = 0
+    priced = unpriced = hidden = delta_filtered = 0
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     daily_realized: dict[str, float] = defaultdict(float)  # entry-date -> realized P&L
 
@@ -307,6 +308,12 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
             entry = float(t.get("paper_entry_price") or 0)
         if (entry is None or entry <= 0 or entry > 1.0) and wp > 0:
             entry = wp
+        # Max-delta VIEW filter (dashboard setting): hide trades whose entry is further than
+        # this % from the whale's, from the figures. The trade STAYS recorded in the sheet —
+        # clearing/raising the filter brings it straight back. 0 = no limit.
+        if max_delta > 0 and wp > 1e-9 and abs(entry - wp) / wp * 100.0 > max_delta:
+            delta_filtered += 1
+            continue
         cost = size * entry
         cur = price_by_token.get(token)
 
@@ -466,6 +473,8 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
         "unpriced_count": unpriced,
         "hidden_count": hidden,
         "scale_pct": round(scale_pct, 3),
+        "max_delta_pct": max_delta,
+        "delta_filtered_count": delta_filtered,
     }
     # Live-only view (real placed orders), computed from the same trades + prices.
     live_rows, live_summary = build_live_view(trades, price_by_token, resolved_by_condition)
@@ -548,6 +557,7 @@ def build_live_view(trades: list[dict], price_by_token: dict[str, float],
     in the same shape the dashboard uses for the paper view, so rendering is identical."""
     now = _now_iso()
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    max_delta = read_max_delta()                # same view filter as the paper view
     agg: dict[str, dict] = defaultdict(lambda: {
         "net_paper_size": 0.0, "total_bought": 0.0, "cost_basis": 0.0, "pnl": 0.0,
         "market_title": "", "outcome": "", "condition_id": "", "cur_price": None,
@@ -580,6 +590,11 @@ def build_live_view(trades: list[dict], price_by_token: dict[str, float],
         else:
             size = filled if filled > 0 else intended_shares
         if size <= 0 or entry <= 0:
+            continue
+        # Max-delta VIEW filter (same dashboard setting): hide fills too far from the whale's
+        # price. Order stays recorded; clearing the filter brings it back. 0 = no limit.
+        _wp = _f(t.get("rn1_price"))
+        if max_delta > 0 and _wp > 1e-9 and abs(entry - _wp) / _wp * 100.0 > max_delta:
             continue
         placed += 1
 
@@ -686,6 +701,7 @@ def build_live_view(trades: list[dict], price_by_token: dict[str, float],
         "hidden_count": 0,
         "scale_pct": "",          # scale is a paper-only what-if; N/A for live
         "order_count": placed,
+        "max_delta_pct": max_delta,
     }
     return rows, summary
 
@@ -718,6 +734,20 @@ def read_scale() -> float:
     except (OSError, ValueError):
         pass
     return _scale_cache
+
+
+def read_max_delta() -> float:
+    """Max entry-delta % VIEW filter, set on the dashboard in maxdelta_<NAME>.txt. Positions
+    whose entry is further than this % from the whale's are HIDDEN from the figures — but the
+    underlying trades stay fully recorded, so clearing the filter brings them back. 0 (or
+    missing file) = no limit."""
+    base = os.path.dirname(os.path.abspath(config.EXCEL_PATH))
+    path = os.path.join(base, f"maxdelta_{config.TARGET_NAME}.txt")
+    try:
+        v = float(open(path).read().strip())
+        return v if v > 0 else 0.0
+    except (OSError, ValueError):
+        return 0.0
 
 
 def write_state_json(summary: dict, rows: list[dict],

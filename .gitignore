@@ -22,3 +22,4 @@ __pycache__/
 scale_*.txt
 peak_*.json
 live_*.txt
+maxdelta_*.txt

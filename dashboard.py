@@ -68,6 +68,24 @@ def _write_scale(name: str, v: float) -> None:
         fh.write(f"{v:g}")
 
 
+def _maxdelta_path(name: str) -> str:
+    return os.path.join(DATA_DIR, f"maxdelta_{name}.txt")
+
+
+def _read_maxdelta(name: str) -> float:
+    """Max entry-delta % view filter (0 = no limit)."""
+    try:
+        v = float(open(_maxdelta_path(name)).read().strip())
+        return v if v > 0 else 0.0
+    except (OSError, ValueError):
+        return 0.0
+
+
+def _write_maxdelta(name: str, v: float) -> None:
+    with open(_maxdelta_path(name), "w") as fh:
+        fh.write(f"{v:g}")
+
+
 def _live_path(name: str) -> str:
     return os.path.join(DATA_DIR, f"live_{name}.txt")
 
@@ -236,7 +254,7 @@ def _row_cells(r: dict) -> dict[str, str]:
     }
 
 
-def _render_tracker(s: dict, scale_val: float, date_filter: str = "") -> str:
+def _render_tracker(s: dict, scale_val: float, date_filter: str = "", maxdelta_val: float = 0.0) -> str:
     name = s.get("name", "?")
     live_mode = bool(s.get("live"))
     # In live mode show ONLY real placed orders; paper data stays computed in the
@@ -339,10 +357,20 @@ def _render_tracker(s: dict, scale_val: float, date_filter: str = "") -> str:
       </form>
       <button class="btn" onclick="location.reload()">&#8635; Refresh</button>
       <span class="hint">Decimals allowed (e.g. 0.1 = 0.1%). Recomputes ALL trades (only those &ge; $1 at that scale); applies within ~1 min.</span>
+    </div>
+    <div class="controls">
+      <form class="scale" method="post" action="/maxdelta">
+        <input type="hidden" name="tracker" value="{name}">
+        <label>Max delta %: <input type="number" name="maxdelta" min="0" step="0.1" value="{maxdelta_val:g}" placeholder="no limit"></label>
+        <button class="btn">Apply</button>
+      </form>
+      <span class="hint">0 = no limit. Hides positions whose entry is &gt; this % from the whale's. All trades stay recorded — clear it to bring them back.</span>
     </div>"""
+        _md = summ.get('max_delta_pct', 0) or 0
+        _mdtxt = f" · max &Delta; {_md:g}% ({summ.get('delta_filtered_count',0)} filtered)" if _md else ""
         meta = (f"Updated {summ.get('last_updated','')} · Scale {summ.get('scale_pct',100):g}%"
                 f" · Return {summ.get('total_pnl_pct',0):.2f}% · {summ.get('priced_count',0)} counted,"
-                f" {summ.get('hidden_count',0)} hidden &lt;$1{note}")
+                f" {summ.get('hidden_count',0)} hidden &lt;$1{_mdtxt}{note}")
 
     return f"""
       <h1>@{name} <span class="sub">· {live}</span></h1>
@@ -744,6 +772,20 @@ def set_scale():
     return redirect(f"/?t={name}")
 
 
+@app.route("/maxdelta", methods=["POST"])
+def set_maxdelta():
+    if not _auth_ok():
+        return _need_auth()
+    name = request.form.get("tracker", "").strip()
+    try:
+        v = max(0.0, float(request.form.get("maxdelta", "0")))
+    except ValueError:
+        v = 0.0
+    if name:
+        _write_maxdelta(name, v)
+    return redirect(f"/?t={name}")
+
+
 @app.route("/")
 def index():
     if not _auth_ok():
@@ -767,7 +809,8 @@ def index():
         if scale_val is None:
             scale_val = float(s.get("summary", {}).get("scale_pct", 100) or 100)
         date_filter = request.args.get("date", "")
-        inner = _render_tracker(s, scale_val, date_filter)
+        maxdelta_val = _read_maxdelta(active)
+        inner = _render_tracker(s, scale_val, date_filter, maxdelta_val)
         # Live/paper toggle (top-right). Turning it ON asks for confirmation.
         live = bool(s.get("live"))
         livebtn = (f'<form method="post" action="/live" onsubmit="return confirmLive(this)" '
