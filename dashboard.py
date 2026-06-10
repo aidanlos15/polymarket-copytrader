@@ -384,8 +384,8 @@ def _build_export(name: str, s: dict, rows: list[dict], live_mode: bool, date_fi
     unreal = sum(f(r.get("pnl")) for r in open_rows)
     cost = sum(f(r.get("cost_basis")) for r in rows)
     value = sum(f(r.get("current_value")) for r in open_rows)
-    tb = sum(f(r.get("total_bought")) for r in rows)
-    avg_delta = (sum(f(r.get("total_bought")) * f(r.get("delta")) for r in rows) / tb) if tb > 1e-9 else 0.0
+    tc = sum(f(r.get("cost_basis")) for r in rows)   # dollar-weighted (by cost basis)
+    avg_delta = (sum(f(r.get("cost_basis")) * f(r.get("delta")) for r in rows) / tc) if tc > 1e-9 else 0.0
 
     CCY, PRICE, SIZE, PCT = "$#,##0.00", "0.000", "#,##0.0000", '0.0"%"'
     NAVY, BLUE, GREEN, RED, LIGHT = "1F3864", "2F5496", "2E7D32", "C62828", "F2F6FC"

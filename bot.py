@@ -406,11 +406,11 @@ def mark_to_market(sheets: ExcelClient, scale_pct: float) -> None:
     # Daily realized P&L, most-recent-day first (8th, 7th, 6th, ...). Sums to total realized.
     daily_series = sorted(daily_realized.items(), key=lambda kv: kv[0], reverse=True)[:30]
     today_pnl = daily_realized.get(today_str, 0.0)
-    # Share-weighted AVERAGE ABSOLUTE delta = avg |our entry - whale entry| across bought
-    # volume. Always positive (it's a magnitude of how far our entries are from the whale's).
-    _tot_bought = sum(r.get("total_bought", 0) for r in rows)
-    avg_delta = (sum(r.get("total_bought", 0) * r.get("delta", 0) for r in rows) / _tot_bought
-                 if _tot_bought > 1e-9 else 0.0)
+    # DOLLAR-weighted average absolute delta = avg |our entry - whale entry|, weighting each
+    # position by the $ we put into it (cost basis) so bigger-dollar trades count more.
+    _tot_cost = sum(r.get("cost_basis", 0) for r in rows)
+    avg_delta = (sum(r.get("cost_basis", 0) * r.get("delta", 0) for r in rows) / _tot_cost
+                 if _tot_cost > 1e-9 else 0.0)
     summary = {
         "last_updated": now,
         "avg_delta": round(avg_delta, 6),
@@ -626,10 +626,10 @@ def build_live_view(trades: list[dict], price_by_token: dict[str, float],
         })
     rows.sort(key=lambda r: r.get("first_ts", 0), reverse=True)
     daily_series = sorted(daily_realized.items(), key=lambda kv: kv[0], reverse=True)[:30]
-    # Share-weighted average absolute delta = avg |our entry - whale entry| (always positive).
-    _tot_bought = sum(r.get("total_bought", 0) for r in rows)
-    avg_delta = (sum(r.get("total_bought", 0) * r.get("delta", 0) for r in rows) / _tot_bought
-                 if _tot_bought > 1e-9 else 0.0)
+    # Dollar-weighted average absolute delta (weight each position by $ cost basis).
+    _tot_cost = sum(r.get("cost_basis", 0) for r in rows)
+    avg_delta = (sum(r.get("cost_basis", 0) * r.get("delta", 0) for r in rows) / _tot_cost
+                 if _tot_cost > 1e-9 else 0.0)
     summary = {
         "last_updated": now,
         "avg_delta": round(avg_delta, 6),
